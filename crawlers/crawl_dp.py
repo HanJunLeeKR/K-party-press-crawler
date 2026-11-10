@@ -48,7 +48,7 @@ BOARDS = {
 }
 BOARD_BY_ID = {v: k for k, v in BOARDS.items()}
 
-TIMEOUT = 30
+TIMEOUT = (10, 60)  # (연결, 읽기) 제한 시간 — 느린 응답이 한 항목을 오래 붙잡지 않도록
 MAX_RETRIES = 3
 WORKERS = 3  # 동시 요청 수 (사이트 부담을 줄이려고 낮게 유지)
 ZERO_WIDTH = re.compile(r"[﻿​‌‍\xa0]")
@@ -207,7 +207,7 @@ def extract_text_from_file(path, ext):
 
 def fetch_attachment_text(session, links, att_dir, post_id):
     """첨부의 본문 텍스트 추출 (PDF, HWP). 반환: (text, names, status)"""
-    names, texts, unsupported, failed = [], [], [], []
+    names, texts, unsupported, failed, denied = [], [], [], [], []
     for url, name in links:
         names.append(name)
         ext = os.path.splitext(name)[1].lower()
@@ -219,6 +219,10 @@ def fetch_attachment_text(session, links, att_dir, post_id):
         path = os.path.join(att_dir, f"{post_id}_{len(names)}{ext}")
         with open(path, "wb") as f:
             f.write(r.content)
+        if r.content[:200].lstrip().startswith(b"<script>alert"):
+            # 사이트가 파일 대신 '잘못된 접근' 경고를 돌려준 경우 (게시물 권한 문제로 추정)
+            denied.append(name)
+            continue
         t = extract_text_from_file(path, ext)
         if t:
             texts.append(t)
@@ -229,6 +233,8 @@ def fetch_attachment_text(session, links, att_dir, post_id):
         return text, names, "attachment_ok"
     if failed:
         return "", names, "extract_failed:" + ",".join(failed)[:200]
+    if denied:
+        return "", names, "site_denied"
     if unsupported:
         return "", names, "attachment_unsupported:" + ",".join(sorted(set(unsupported)))
     return "", names, "no_body"
@@ -263,6 +269,10 @@ def fetch_detail(session, item, raw_dir, att_dir):
         links = attachment_links(soup)
         text, names, status = fetch_attachment_text(session, links, att_dir, item["post_id"])
         source = "attachment" if text else "none"
+        if status == "no_body":
+            c = soup.find("div", {"class": "board-view__contents"})
+            if c is not None and c.find("img"):
+                status = "image_only"  # 본문이 이미지로만 되어 있음 (OCR 필요, 현재 미처리)
     return {
         **item,
         "pub_date": pub,
@@ -304,7 +314,9 @@ def run_details(session, items, out_dir, raw_dir, log=print):
         for rnd in range(3):
             queue = todo if rnd == 0 else failed
             failed = []
-            for i, (it, rec, err) in enumerate(pool.map(work, queue), 1):
+            futures = [pool.submit(work, it) for it in queue]
+            for i, fut in enumerate(concurrent.futures.as_completed(futures), 1):
+                it, rec, err = fut.result()
                 if rec is None:
                     failed.append(it)
                     continue
@@ -368,6 +380,7 @@ def main(argv=None):
     ap.add_argument("--no-details", action="store_true", help="목록만 수집")
     ap.add_argument("--sample-ids", default="", help="쉼표로 구분한 post_id만 상세 수집 (시험용)")
     ap.add_argument("--reuse-list", action="store_true", help="이전 list.json이 있으면 목록 재수집 생략")
+    ap.add_argument("--exclude-csv", default="", help="이 CSV에 있는 같은 게시판 post_id는 건너뜀 (델타 수집)")
     args = ap.parse_args(argv)
 
     if args.board not in BOARD_BY_ID:
@@ -400,6 +413,16 @@ def main(argv=None):
     if args.sample_ids:
         keep = {int(x) for x in args.sample_ids.split(",") if x.strip()}
         items = [it for it in items if it["post_id"] in keep]
+
+    if args.exclude_csv:
+        # 기존 CSV에 이미 있는 post_id(같은 게시판)는 건너뛴다 (델타 수집)
+        import pandas as pd
+        old = pd.read_csv(args.exclude_csv, encoding="utf-8-sig", engine="python", on_bad_lines="warn")
+        old = old[old["board_name"] == name]
+        old_ids = set(old["url"].astype(str).str.extract(r"post=(\d+)")[0].dropna().astype(int))
+        before = len(items)
+        items = [it for it in items if it["post_id"] not in old_ids]
+        log(f"  기존 CSV 제외: {before}건 → {len(items)}건 남음 (기존 {len(old_ids)}건)")
 
     failed = run_details(session, items, out_dir, raw_dir, log=log)
     rows = load_jsonl(os.path.join(out_dir, "details.jsonl"))
