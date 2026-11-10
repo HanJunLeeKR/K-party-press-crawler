@@ -1,0 +1,17 @@
+# Data files: stored on Hugging Face (hanjunlee/KoreanPartyPressRelease), never in git
+*.csv
+*.xlsx
+*.parquet
+data/
+output/
+download/
+
+# Secrets and local environment
+.env
+*.token
+hf_token*
+
+# Logs and caches
+*.log
+__pycache__/
+.ipynb_checkpoints/
