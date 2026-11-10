@@ -1,380 +1,227 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-조국혁신당 크롤러 - 완전판
-- requests 기반 (빠름)
-- 500페이지마다 세션 재생성 (메모리 정리)
-- 재시도 로직 (3회)
-- 실패한 페이지 건너뛰기
-- 빈 페이지 3회 연속 감지 → 자동 종료
+조국혁신당 보도자료 수집기 (v2: 내부 API 기반)
+
+배경
+- 사이트가 Next.js 클라이언트 렌더링으로 바뀌어 HTML 목록에는 기사 링크가 없다.
+- 목록은 사이트가 쓰는 내부 API(POST /api/board/list)로 받는다.
+- 본문은 API의 descriptionText에 전체가 들어 있다. 기존 방식(<p> 태그만 읽기)은
+  본문 일부를 빠뜨렸다 (2026-11 진단 참고).
+
+동작
+- 게시판별로 recordSize=100 페이지를 lastPage까지 순회한다.
+- 수집 건수가 API가 보고한 pagination.count와 다르면 실패로 처리한다 (조용한 누락 방지).
+- 페이지 응답 원본(JSON)을 raw/ 아래에 보존한다.
+- 요청 실패는 재시도 후에도 실패하면 예외로 중단한다. 빈 결과를 성공으로 취급하지 않는다.
+
+사용
+  python crawl_cj.py --out ./out            # 전체 게시판
+  python crawl_cj.py --out ./out --boards 보도자료
 """
 
+import argparse
+import csv
+import json
 import os
-import time
-import re
 import random
+import re
+import sys
+import time
 from datetime import datetime
-import pandas as pd
-from tqdm import tqdm
+
 import requests
-from bs4 import BeautifulSoup
 
-def parse_date(date_str):
-    """날짜 파싱 (여러 형식 지원)"""
-    try:
-        # 2026-02-03 형식
-        return datetime.strptime(date_str.strip(), '%Y-%m-%d')
-    except:
-        return None
+BASE_SITE = "https://rebuildingkoreaparty.kr"
+API_URL = "https://api.rebuildingkoreaparty.kr/api/board/list"
+PARTY_NAME = "조국혁신당"
 
-def create_session():
-    """세션 생성 (연결 재사용으로 속도 향상)"""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9',
-    })
-    return session
+# 게시판 이름 -> categoryId (사이트 JS 번들의 getCategoryId 매핑과 동일)
+BOARDS = {
+    "기자회견문": 6,
+    "논평브리핑": 7,
+    "보도자료": 9,
+}
 
-def get_with_retry(session, url, max_retries=3, timeout=10):
-    """재시도 로직"""
-    for attempt in range(max_retries):
+RECORD_SIZE = 100
+MAX_RETRIES = 3
+TIMEOUT = 30
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    "Accept": "application/json",
+    "Content-Type": "application/json",
+    "Origin": BASE_SITE,
+    "Referer": BASE_SITE + "/news/press-release",
+    "Accept-Language": "ko-KR,ko;q=0.9",
+}
+
+
+class CrawlError(RuntimeError):
+    """수집 실패. 부분 결과를 성공으로 저장하지 않기 위해 사용한다."""
+
+
+def make_session():
+    s = requests.Session()
+    s.headers.update(HEADERS)
+    return s
+
+
+def fetch_page(session, category_id, page):
+    """한 페이지를 가져온다. 재시도 후에도 실패하면 CrawlError."""
+    body = {
+        "page": page,
+        "categoryId": category_id,
+        "recordSize": RECORD_SIZE,
+        "pageSize": 5,
+        "order": "recent",
+    }
+    last_err = None
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = session.get(url, timeout=timeout)
-            response.raise_for_status()
-            return response
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(1)
-            else:
-                return None
-    return None
+            r = session.post(API_URL, data=json.dumps(body), timeout=TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            if not data.get("success", False):
+                raise CrawlError(f"API success=false (page={page}): {data.get('description')}")
+            return data
+        except (requests.RequestException, ValueError, CrawlError) as e:
+            last_err = e
+            time.sleep(2 * attempt)
+    raise CrawlError(f"page={page} category={category_id} 실패: {last_err}")
 
-def collect_press_list(base_url, board_path, board_name,
-                       start_date_str, end_date_str, max_pages=10000):
 
-    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-    end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+def collect_board(session, board_name, category_id, raw_dir):
+    """게시판 전체를 수집하고 원본 페이지를 저장한다."""
+    first = fetch_page(session, category_id, 1)
+    pagination = first["pagination"]
+    total = pagination["count"]
+    last_page = pagination["lastPage"]
 
-    data = []
-    page_num = 1
-    session = None
-    consecutive_errors = 0
-    max_consecutive_errors = 10
+    items = []
+    pages_raw = []
+    pages_raw.append(first)
+    items.extend(first.get("list") or [])
 
-    # 빈 페이지 감지
-    empty_pages = 0
-    max_empty_pages = 3
+    for page in range(2, last_page + 1):
+        time.sleep(random.uniform(0.3, 0.8))
+        data = fetch_page(session, category_id, page)
+        pages_raw.append(data)
+        items.extend(data.get("list") or [])
 
-    # 중복 감지 (게시글 번호 추적)
-    seen_article_numbers = set()
-    duplicate_pages = 0
-    max_duplicate_pages = 2
+    # 원본 보존
+    os.makedirs(raw_dir, exist_ok=True)
+    raw_path = os.path.join(raw_dir, f"{board_name}_raw.json")
+    with open(raw_path, "w", encoding="utf-8") as f:
+        json.dump(pages_raw, f, ensure_ascii=False)
 
-    print(f"\n▶ [{board_name}] 목록 수집 시작...")
-    pbar = tqdm(desc=f"[{board_name}]", unit="페이지")
+    # 건수 검증
+    ids = [it["id"] for it in items]
+    if len(ids) != total:
+        raise CrawlError(
+            f"[{board_name}] 수집 {len(ids)}건 != API 보고 {total}건 (lastPage={last_page})"
+        )
+    if len(set(ids)) != len(ids):
+        dup = len(ids) - len(set(ids))
+        raise CrawlError(f"[{board_name}] 중복 id {dup}건 발생 (페이지 경계 밀림 의심)")
 
-    while page_num <= max_pages:
-        # 500페이지마다 세션 재생성
-        if page_num % 500 == 0:
-            if session:
-                session.close()
-                pbar.write(f"  🔄 page={page_num}: 세션 재생성 (메모리 정리)")
-            session = create_session()
+    return items, total
 
-        if not session:
-            session = create_session()
 
-        pbar.update(1)
-        pbar.set_postfix({"수집": len(data), "page": page_num})
+def extract_writer(text):
+    """본문 마지막 쪽 문단 중 소속/직책이 드러나는 줄을 작성자로 본다 (기존 규칙 유지)."""
+    if not text:
+        return ""
+    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+    for ln in reversed(lines[-6:]):
+        if "조국혁신당" in ln or "대변인" in ln or "위원회" in ln:
+            return ln
+    return ""
 
-        # 조국혁신당 URL 패턴
-        # 1페이지는 page 파라미터 없음, 2페이지부터는 ?page=2 형식
-        if page_num == 1:
-            url = f"{base_url}/{board_path}"
-        else:
-            url = f"{base_url}/{board_path}?page={page_num}"
 
-        # 랜덤 대기 (0.5-1.5초)
-        time.sleep(random.uniform(0.5, 1.5))
-
-        # 재시도 로직으로 요청
-        response = get_with_retry(session, url, max_retries=3, timeout=10)
-
-        if not response:
-            consecutive_errors += 1
-            pbar.write(f"  ✗ page={page_num} 실패 (연속 {consecutive_errors}회)")
-
-            if consecutive_errors >= max_consecutive_errors:
-                pbar.write(f"  ⚠ 연속 {consecutive_errors}회 실패. 수집 종료.")
-                break
-
-            page_num += 1
-            continue
-
-        # 성공하면 연속 오류 카운터 리셋
-        consecutive_errors = 0
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        # <li class="td date"> 찾기 (각 게시글이 li 구조)
-        # 실제로는 전체 구조를 확인해야 하지만, date li를 기준으로 찾음
-        date_items = soup.find_all('li', {'class': 'td date'})
-
-        if not date_items or len(date_items) == 0:
-            empty_pages += 1
-            pbar.write(f"  ⚠ 게시글 없음 (page={page_num}) [빈 페이지 {empty_pages}/3]")
-
-            if empty_pages >= max_empty_pages:
-                pbar.write(f"  📭 연속 {empty_pages}페이지 비어있음 → 데이터 끝으로 판단, 수집 종료")
-                break
-
-            page_num += 1
-            continue
-
-        # 데이터가 있으면 빈 페이지 카운터 리셋
-        empty_pages = 0
-
-        # 각 게시글 항목 추출
-        # 구조: <ul> 안에 <li class="td category">, <li class="td"><a>, <li class="td date"> 순서
-        # 하지만 정확한 구조를 모르므로, 모든 게시글 항목을 찾아야 함
-
-        # 더 정확하게 찾기 위해 <a href="/news/..."> 패턴으로 찾기
-        article_links = soup.find_all('a', href=re.compile(f'^/news/{board_path}/'))
-
-        if not article_links:
-            empty_pages += 1
-            pbar.write(f"  ⚠ 게시글 링크 없음 (page={page_num}) [빈 페이지 {empty_pages}/3]")
-
-            if empty_pages >= max_empty_pages:
-                pbar.write(f"  📭 연속 {empty_pages}페이지 비어있음 → 데이터 끝으로 판단, 수집 종료")
-                break
-
-            page_num += 1
-            continue
-
-        # 데이터가 있으면 빈 페이지 카운터 리셋
-        empty_pages = 0
-
-        # 이 페이지에서 새로운 게시글이 있는지 체크
-        new_articles_in_page = 0
-
-        stop_flag = False
-
-        for link in article_links:
-            try:
-                # 제목과 URL 추출
-                title = link.get_text(strip=True).replace('\n', ' ')
-                article_url = link.get('href', '')
-
-                # 상대 경로를 절대 경로로
-                if article_url.startswith('/'):
-                    article_url = base_url + article_url
-
-                # 중복 체크 (URL 기반)
-                if article_url in seen_article_numbers:
-                    continue  # 이미 수집한 게시글은 건너뛰기
-
-                # 같은 부모 요소에서 날짜와 카테고리 찾기
-                # link의 부모를 찾아 올라가며 date와 category 찾기
-                parent = link.find_parent('ul')
-                if not parent:
-                    parent = link.find_parent('li')
-                    if parent:
-                        parent = parent.find_parent('ul')
-
-                date_str = ""
-                category = ""
-
-                if parent:
-                    # 같은 ul 내에서 date와 category 찾기
-                    date_li = parent.find('li', {'class': 'td date'})
-                    if date_li:
-                        date_str = date_li.get_text(strip=True)
-
-                    category_li = parent.find('li', {'class': 'td category'})
-                    if category_li:
-                        category = category_li.get_text(strip=True)
-
-                if not date_str:
-                    continue
-
-                article_date = parse_date(date_str)
-
-                if not article_date:
-                    continue
-                if article_date < start_date:
-                    stop_flag = True
-                    break
-                if article_date > end_date:
-                    continue
-
-                data.append({
-                    'no': '',  # 조국혁신당은 no가 없음 (URL에서 ID 추출 가능)
-                    'category': category,
-                    'title': title,
-                    'date': date_str,
-                    'url': article_url,
-                    'board_name': board_name
-                })
-
-                # 새 게시글로 추적 (URL 기반)
-                seen_article_numbers.add(article_url)
-                new_articles_in_page += 1
-
-            except Exception as e:
-                continue
-
-        if stop_flag:
-            pbar.write(f"  📅 시작 날짜({start_date_str}) 이전 도달 → 수집 종료")
-            break
-
-        # 중복 페이지 감지 (새 게시글이 하나도 없으면 중복)
-        if new_articles_in_page == 0:
-            duplicate_pages += 1
-            pbar.write(f"  ⚠ 중복 페이지 감지 (page={page_num}) [연속 {duplicate_pages}회]")
-
-            if duplicate_pages >= max_duplicate_pages:
-                pbar.write(f"  🔁 연속 {duplicate_pages}페이지 중복 → 마지막 페이지로 판단, 수집 종료")
-                break
-        else:
-            duplicate_pages = 0  # 새 게시글이 있으면 카운터 리셋
-
-        page_num += 1
-
-    if session:
-        session.close()
-    pbar.close()
-
-    print(f"✓ [{board_name}] 총 {len(data)}개 수집 (마지막 page: {page_num})")
-    return data
-
-def clean_text(text):
-    text = text.replace('\xa0', '').replace('\u200b', '').replace('​', '')
-    return text.strip()
-
-def collect_press_detail(session, url):
-    try:
-        response = get_with_retry(session, url, max_retries=2, timeout=10)
-        if not response:
-            return {'text': "본문 조회 실패", 'writer': ""}
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        text_parts = []
-        writer = ""
-
-        # 본문 추출: <div class="editor ck-content">
-        contents_div = soup.find('div', {'class': 'editor ck-content'})
-
-        if contents_div:
-            # 모든 <p> 태그 추출
-            paragraphs = contents_div.find_all('p')
-
-            for p in paragraphs:
-                text = p.get_text(strip=True)
-                cleaned = clean_text(text)
-                if cleaned:
-                    text_parts.append(cleaned)
-
-            # 작성자 추출: 마지막 <p> 태그에서 "조국혁신당"이 포함된 경우
-            if paragraphs:
-                for p in reversed(paragraphs):
-                    text = p.get_text(strip=True)
-                    cleaned = clean_text(text)
-                    if '조국혁신당' in cleaned or '대변인' in cleaned or '위원회' in cleaned:
-                        writer = cleaned
-                        break
-
-        return {
-            'text': '\n'.join(text_parts),
-            'writer': writer
-        }
-    except Exception as e:
-        return {'text': "본문 조회 오류", 'writer': ""}
-
-def main():
-    print("\n" + "="*60)
-    print("조국혁신당 보도자료 수집 - 완전판")
-    print("- requests 기반 (빠른 속도)")
-    print("- 500페이지마다 세션 재생성")
-    print("- 재시도 로직 (3회)")
-    print("- 실패 페이지 건너뛰기")
-    print("- ★ 빈 페이지 3회 연속 → 자동 종료")
-    print("="*60)
-
-    party_name = "조국혁신당"
-    base_url = "https://rebuildingkoreaparty.kr"
-
-    party_boards = {
-        "기자회견문": "news/press-conference",
-        "논평브리핑": "news/commentary-briefing",
-        "보도자료": "news/press-release",
+def to_row(board_name, item):
+    created = (item.get("createdAt") or "").strip()
+    date = created.split(" ")[0] if created else ""
+    text = (item.get("descriptionText") or "").strip()
+    return {
+        "id": item["id"],
+        "board_name": board_name,
+        "title": (item.get("title") or "").replace("\n", " ").strip(),
+        "category": item.get("categoryTitle") or board_name,
+        "date": date,
+        "writer": extract_writer(text),
+        "text": text,
+        "url": f"{BASE_SITE}/news/{BOARD_PATHS[board_name]}/{item['id']}",
     }
 
-    start_date = "2024-03-04"  # 조국혁신당 창당일
-    end_date = "2026-02-05"
-    output_path = "/Users/hanjunlee/Downloads/조국혁신당_완전판"
 
-    all_dfs = []
+BOARD_PATHS = {
+    "기자회견문": "press-conference",
+    "논평브리핑": "commentary-briefing",
+    "보도자료": "press-release",
+}
 
-    for board_name, board_path in party_boards.items():
-        # 목록 수집
-        press_list = collect_press_list(
-            base_url, board_path, board_name,
-            start_date, end_date, max_pages=10000
-        )
 
-        if not press_list:
-            continue
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True, help="출력 폴더 (CSV와 raw JSON이 저장됨)")
+    ap.add_argument("--boards", nargs="*", default=list(BOARDS), help="수집할 게시판 이름")
+    ap.add_argument("--start", default="2024-03-04", help="이 날짜 이전 글은 제외 (YYYY-MM-DD)")
+    ap.add_argument("--end", default="2100-01-01", help="이 날짜 이후 글은 제외 (YYYY-MM-DD)")
+    args = ap.parse_args(argv)
 
-        # 상세 정보 수집
-        print(f"\n▶ [{board_name}] 본문 수집 중... ({len(press_list)}개)")
+    out_dir = args.out
+    raw_dir = os.path.join(out_dir, "raw")
+    os.makedirs(out_dir, exist_ok=True)
 
-        session = create_session()
+    session = make_session()
+    rows = []
+    summary = {}
 
-        for i, item in enumerate(tqdm(press_list, desc=f"[{board_name}]", unit="건"), 1):
-            # 500건마다 세션 재생성
-            if i % 500 == 0:
-                session.close()
-                session = create_session()
+    for board_name in args.boards:
+        if board_name not in BOARDS:
+            raise SystemExit(f"알 수 없는 게시판: {board_name}")
+        items, total = collect_board(session, board_name, BOARDS[board_name], raw_dir)
+        kept = 0
+        for it in items:
+            row = to_row(board_name, it)
+            if not row["date"]:
+                raise CrawlError(f"[{board_name}] 날짜 없음 id={row['id']}")
+            if row["date"] < args.start or row["date"] > args.end:
+                continue
+            rows.append(row)
+            kept += 1
+        summary[board_name] = {"api_count": total, "collected": len(items), "kept_in_range": kept}
+        print(f"✓ [{board_name}] API {total}건 / 수집 {len(items)}건 / 기간 내 {kept}건", file=sys.stderr)
 
-            time.sleep(random.uniform(0.3, 0.8))
-            details = collect_press_detail(session, item['url'])
-            item['text'] = details['text']
-            item['writer'] = details['writer']
+    # 빈 본문은 조용히 버리지 않고 표시한다.
+    empty = [r["id"] for r in rows if not r["text"]]
+    if empty:
+        print(f"⚠ 본문 공란 {len(empty)}건 (id 목록은 summary.json에 기록)", file=sys.stderr)
 
-        session.close()
-        print(f"✓ [{board_name}] 완료")
+    cols = ["id", "board_name", "title", "category", "date", "writer", "text", "url"]
+    csv_path = os.path.join(out_dir, f"{PARTY_NAME}_보도자료_{args.start}_{args.end}.csv")
+    with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, quoting=csv.QUOTE_ALL)
+        w.writeheader()
+        for r in rows:
+            w.writerow(r)
 
-        df = pd.DataFrame(press_list)
-        df = df[['board_name', 'no', 'title', 'category', 'date', 'writer', 'text', 'url']]
-        all_dfs.append(df)
+    with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as f:
+        json.dump({
+            "generated_at": datetime.now().isoformat(timespec="seconds"),
+            "boards": summary,
+            "rows": len(rows),
+            "empty_text_ids": empty,
+        }, f, ensure_ascii=False, indent=2)
 
-    if not all_dfs:
-        print("\n⚠️ 수집 데이터 없음")
-        return
+    print(f"✓ 저장: {csv_path} ({len(rows)}행)", file=sys.stderr)
+    return 0
 
-    # 저장
-    combined_df = pd.concat(all_dfs, ignore_index=True)
-    valid_df = combined_df[(combined_df['title'] != "") & (combined_df['text'] != "")]
-
-    os.makedirs(output_path, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"{party_name}_보도자료_{start_date}_{end_date}_{timestamp}.csv"
-    output_file = os.path.join(output_path, filename)
-
-    valid_df.to_csv(output_file, index=False, encoding='utf-8-sig')
-
-    print("\n" + "="*60)
-    print(f"✓ 총 {len(valid_df)}개 저장")
-    for board_name in party_boards.keys():
-        count = len(valid_df[valid_df['board_name'] == board_name])
-        print(f"  • {board_name}: {count}개")
-    print(f"✓ 저장: {output_file}")
-    print("="*60)
-    print("\n★ 완료! ★\n")
 
 if __name__ == "__main__":
-    main()
+    try:
+        sys.exit(main())
+    except CrawlError as e:
+        print(f"✗ 수집 중단: {e}", file=sys.stderr)
+        sys.exit(2)
