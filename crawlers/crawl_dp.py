@@ -23,6 +23,7 @@
 
 import argparse
 import concurrent.futures
+import glob
 import gzip
 import json
 import os
@@ -62,6 +63,44 @@ HEADERS = {
 
 class FetchError(RuntimeError):
     pass
+
+
+# 수집 불가 사유 (CSV의 fail_reason 컬럼). 수집에 성공한 행은 빈 값이다.
+# 상세 기록(details.jsonl)에는 fail_code(세부 코드)를 함께 남긴다.
+SUCCESS_STATUS = {"ok", "attachment_ok", "image_ocr"}
+REASON_TEXT = {
+    "site_denied": "사이트 접근 거부: 첨부 요청에 '잘못된 접근' 경고가 돌아옴",
+    "no_body": "본문·첨부·이미지 모두 없음 (빈 게시물)",
+    "image_no_src": "본문 이미지 주소(src) 없음",
+    "image_download_failed": "본문 이미지 다운로드 실패 (외부 서버 오류 등)",
+    "image_ocr_empty": "이미지는 받았으나 OCR 텍스트 없음 (글자 없는 사진·도표 등)",
+    "image_unknown": "이미지 상태 미기록 (backfill 필요)",
+    "extract_failed": "첨부 텍스트 추출 실패 (스캔 PDF 등 추정)",
+    "fetch_failed": "상세 페이지 요청 실패 (재시도 후에도 실패)",
+}
+
+
+def image_fail_code(total, downloaded):
+    """본문 이미지 상태 → 세부 코드."""
+    if total == 0:
+        return "image_no_src"
+    if downloaded == 0:
+        return "image_download_failed"
+    return "image_ocr_empty"
+
+
+def reason_text(status, fail_code=""):
+    """status/fail_code → 사람이 읽는 수집 불가 사유. 성공이면 빈 문자열."""
+    if status in SUCCESS_STATUS:
+        return ""
+    code = fail_code or status
+    if code.startswith("attachment_unsupported:"):
+        return "미지원 첨부 형식 (" + code.split(":", 1)[1] + ")"
+    if code.startswith("extract_failed"):
+        return REASON_TEXT["extract_failed"]
+    if code == "image_only_ocr_empty":
+        return REASON_TEXT["image_unknown"]
+    return REASON_TEXT.get(code, "기타: " + str(status))
 
 
 def make_session():
@@ -240,18 +279,22 @@ def fetch_attachment_text(session, links, att_dir, post_id):
     return "", names, "no_body"
 
 
-def ocr_body_images(session, soup, post_id, img_dir, max_images=30):
-    """본문 이미지를 받아 tesseract(kor+eng)로 OCR. 반환: 텍스트 (없으면 빈 문자열)."""
+def image_srcs(soup):
+    """본문 이미지의 절대 URL 목록 (data: 링크 제외)."""
     c = soup.find("div", {"class": "board-view__contents"})
     if c is None:
-        return ""
-    srcs = []
-    for img in c.find_all("img", src=True):
-        src = img["src"]
-        if src.startswith("data:"):
-            continue
-        srcs.append(urljoin(SITE, src))
-    texts = []
+        return []
+    return [urljoin(SITE, img["src"]) for img in c.find_all("img", src=True)
+            if not img["src"].startswith("data:")]
+
+
+def ocr_body_images(session, soup, post_id, img_dir, max_images=30):
+    """본문 이미지를 받아 tesseract(kor+eng)로 OCR.
+    반환: (텍스트, 이미지 주소 수, 다운로드 성공 수). 텍스트가 없으면 빈 문자열."""
+    srcs = image_srcs(soup)
+    texts, downloaded = [], 0
+    if not srcs:
+        return "", 0, 0
     os.makedirs(img_dir, exist_ok=True)
     for n, url in enumerate(srcs[:max_images], 1):
         # 이미지 하나가 외부 서버 오류(503 등)로 실패해도 게시물 전체를 실패시키지 않는다.
@@ -263,6 +306,7 @@ def ocr_body_images(session, soup, post_id, img_dir, max_images=30):
         path = os.path.join(img_dir, f"{post_id}_{n}{ext}")
         with open(path, "wb") as f:
             f.write(r.content)
+        downloaded += 1
         try:
             res = subprocess.run(["tesseract", path, "-", "-l", "kor+eng", "--psm", "3"],
                                  capture_output=True, timeout=180)
@@ -271,7 +315,26 @@ def ocr_body_images(session, soup, post_id, img_dir, max_images=30):
             t = ""
         if t:
             texts.append(t)
-    return "\n".join(texts)
+    return "\n".join(texts), len(srcs), downloaded
+
+
+def backfill_fail_code(row, raw_dir):
+    """이전에 저장된 행(fail_code 없음)의 이미지 상태를 원본 HTML과 raw/images로 다시 판정한다."""
+    if row.get("fail_code") or row.get("status") != "image_only_ocr_empty":
+        return row.get("fail_code", "")
+    gz = os.path.join(raw_dir, "detail", f"{row['brd']}_{row['post_id']}.html.gz")
+    if not os.path.exists(gz):
+        return "image_unknown"
+    with gzip.open(gz, "rt", encoding="utf-8") as f:
+        soup = BeautifulSoup(f.read(), "html.parser")
+    srcs = image_srcs(soup)
+    total = len(srcs)
+    downloaded = 0
+    img_dir = os.path.join(raw_dir, "images")
+    for n in range(1, min(total, 30) + 1):  # ocr_body_images와 같은 파일 이름 규칙
+        if glob.glob(os.path.join(img_dir, f"{row['post_id']}_{n}.*")):
+            downloaded += 1
+    return image_fail_code(total, downloaded)
 
 
 def extract_writer(text):
@@ -297,6 +360,7 @@ def fetch_detail(session, item, raw_dir, att_dir):
         f.write(r.text)
 
     pub = extract_pub_date(soup)
+    fail_code = ""
     if len(body) >= 5:
         status, names, text, source = "ok", [], body, "body"
     else:
@@ -306,11 +370,13 @@ def fetch_detail(session, item, raw_dir, att_dir):
         if status == "no_body":
             c = soup.find("div", {"class": "board-view__contents"})
             if c is not None and c.find("img"):
-                ocr = ocr_body_images(session, soup, item["post_id"], os.path.join(raw_dir, "images"))
+                ocr, total, downloaded = ocr_body_images(
+                    session, soup, item["post_id"], os.path.join(raw_dir, "images"))
                 if ocr:
                     text, source, status = ocr, "ocr", "image_ocr"
                 else:
                     status = "image_only_ocr_empty"
+                    fail_code = image_fail_code(total, downloaded)
     return {
         **item,
         "pub_date": pub,
@@ -319,6 +385,7 @@ def fetch_detail(session, item, raw_dir, att_dir):
         "text": text,
         "text_source": source,
         "status": status,
+        "fail_code": fail_code,
         "attachments": "|".join(names),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -394,7 +461,7 @@ def load_jsonl(path):
 def write_csv(out_dir, rows, name):
     import csv
     cols = ["post_id", "board_name", "title", "category", "date", "pub_date", "date_mismatch",
-            "writer", "text", "text_source", "status", "attachments", "url", "fetched_at"]
+            "writer", "text", "text_source", "status", "fail_reason", "attachments", "url", "fetched_at"]
     path = os.path.join(out_dir, name)
     # 같은 post_id가 여러 번 있으면 마지막 기록을 사용
     last = {}
@@ -406,6 +473,7 @@ def write_csv(out_dir, rows, name):
         for r in last.values():
             r = dict(r)
             r["board_name"] = BOARD_BY_ID.get(r.get("brd"), "")
+            r["fail_reason"] = reason_text(r.get("status", ""), r.get("fail_code", ""))
             w.writerow(r)
     return path, len(last)
 
@@ -424,11 +492,13 @@ def ocr_existing(session, out_dir, raw_dir, log=print):
         with gzip.open(gz, "rt", encoding="utf-8") as f:
             soup = BeautifulSoup(f.read(), "html.parser")
         time.sleep(random.uniform(0.3, 0.8))
-        ocr = ocr_body_images(session, soup, r["post_id"], os.path.join(raw_dir, "images"))
+        ocr, total, downloaded = ocr_body_images(session, soup, r["post_id"], os.path.join(raw_dir, "images"))
         if ocr:
             r["text"], r["text_source"], r["status"] = ocr, "ocr", "image_ocr"
+            r["fail_code"] = ""
         else:
             r["status"] = "image_only_ocr_empty"
+            r["fail_code"] = image_fail_code(total, downloaded)
         r["writer"] = extract_writer(r["text"])
         changed += 1
         if changed % 20 == 0:
@@ -452,6 +522,9 @@ def main(argv=None):
     ap.add_argument("--reuse-list", action="store_true", help="이전 list.json이 있으면 목록 재수집 생략")
     ap.add_argument("--exclude-csv", default="", help="이 CSV에 있는 같은 게시판 post_id는 건너뜀 (델타 수집)")
     ap.add_argument("--ocr-existing", action="store_true", help="기존 image_only 행을 OCR로 갱신하고 CSV를 다시 씀")
+    ap.add_argument("--backfill-reasons", action="store_true",
+                    help="--from-dir의 기존 수집분에 fail_code를 채워 --out에 새 details.jsonl/CSV를 씀 (원본 raw는 읽기만)")
+    ap.add_argument("--from-dir", default="", help="--backfill-reasons의 원본 출력 루트 (brd{N}_{이름} 폴더가 들어 있는 곳)")
     args = ap.parse_args(argv)
 
     if args.board not in BOARD_BY_ID:
@@ -463,6 +536,22 @@ def main(argv=None):
 
     def log(msg):
         print(msg, file=sys.stderr, flush=True)
+
+    if args.backfill_reasons:
+        if not args.from_dir:
+            raise SystemExit("--backfill-reasons에는 --from-dir이 필요합니다.")
+        src_dir = os.path.join(args.from_dir, f"brd{args.board}_{name}")
+        src_raw = os.path.join(src_dir, "raw")  # 원본은 읽기만 한다
+        rows = load_jsonl(os.path.join(src_dir, "details.jsonl"))
+        for r in rows:
+            if r.get("status") == "image_only_ocr_empty" and not r.get("fail_code"):
+                r["fail_code"] = backfill_fail_code(r, src_raw)
+        with open(os.path.join(out_dir, "details.jsonl"), "w", encoding="utf-8") as f:
+            for r in rows:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        path, n = write_csv(out_dir, rows, f"{name}.csv")
+        log(f"✓ 사유 백필 저장 {path} ({n}행)")
+        return 0
 
     session = make_session()
     session.get(LIST_URL + f"?brd={args.board}", timeout=TIMEOUT)  # CYBER 쿠키 확보
