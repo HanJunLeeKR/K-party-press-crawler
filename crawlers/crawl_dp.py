@@ -240,6 +240,40 @@ def fetch_attachment_text(session, links, att_dir, post_id):
     return "", names, "no_body"
 
 
+def ocr_body_images(session, soup, post_id, img_dir, max_images=30):
+    """본문 이미지를 받아 tesseract(kor+eng)로 OCR. 반환: 텍스트 (없으면 빈 문자열)."""
+    c = soup.find("div", {"class": "board-view__contents"})
+    if c is None:
+        return ""
+    srcs = []
+    for img in c.find_all("img", src=True):
+        src = img["src"]
+        if src.startswith("data:"):
+            continue
+        srcs.append(urljoin(SITE, src))
+    texts = []
+    os.makedirs(img_dir, exist_ok=True)
+    for n, url in enumerate(srcs[:max_images], 1):
+        # 이미지 하나가 외부 서버 오류(503 등)로 실패해도 게시물 전체를 실패시키지 않는다.
+        try:
+            r = get(session, url)
+        except FetchError:
+            continue
+        ext = os.path.splitext(urlparse(url).path)[1].lower() or ".jpg"
+        path = os.path.join(img_dir, f"{post_id}_{n}{ext}")
+        with open(path, "wb") as f:
+            f.write(r.content)
+        try:
+            res = subprocess.run(["tesseract", path, "-", "-l", "kor+eng", "--psm", "3"],
+                                 capture_output=True, timeout=180)
+            t = clean_extracted(res.stdout.decode("utf-8", errors="ignore"))
+        except (OSError, subprocess.SubprocessError):
+            t = ""
+        if t:
+            texts.append(t)
+    return "\n".join(texts)
+
+
 def extract_writer(text):
     if not text:
         return ""
@@ -272,7 +306,11 @@ def fetch_detail(session, item, raw_dir, att_dir):
         if status == "no_body":
             c = soup.find("div", {"class": "board-view__contents"})
             if c is not None and c.find("img"):
-                status = "image_only"  # 본문이 이미지로만 되어 있음 (OCR 필요, 현재 미처리)
+                ocr = ocr_body_images(session, soup, item["post_id"], os.path.join(raw_dir, "images"))
+                if ocr:
+                    text, source, status = ocr, "ocr", "image_ocr"
+                else:
+                    status = "image_only_ocr_empty"
     return {
         **item,
         "pub_date": pub,
@@ -372,6 +410,38 @@ def write_csv(out_dir, rows, name):
     return path, len(last)
 
 
+def ocr_existing(session, out_dir, raw_dir, log=print):
+    """이미 수집된 image_only 행을 저장된 원본 HTML로 다시 보고 OCR 결과로 갱신한다."""
+    ck = os.path.join(out_dir, "details.jsonl")
+    rows = load_jsonl(ck)
+    changed = 0
+    for r in rows:
+        if r.get("status") not in ("image_only", "image_only_ocr_empty"):
+            continue
+        gz = os.path.join(raw_dir, "detail", f"{r['brd']}_{r['post_id']}.html.gz")
+        if not os.path.exists(gz):
+            continue
+        with gzip.open(gz, "rt", encoding="utf-8") as f:
+            soup = BeautifulSoup(f.read(), "html.parser")
+        time.sleep(random.uniform(0.3, 0.8))
+        ocr = ocr_body_images(session, soup, r["post_id"], os.path.join(raw_dir, "images"))
+        if ocr:
+            r["text"], r["text_source"], r["status"] = ocr, "ocr", "image_ocr"
+        else:
+            r["status"] = "image_only_ocr_empty"
+        r["writer"] = extract_writer(r["text"])
+        changed += 1
+        if changed % 20 == 0:
+            log(f"    OCR {changed}건 완료")
+    tmp = ck + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, ck)
+    log(f"  image_only OCR 갱신 {changed}건")
+    return changed
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -381,6 +451,7 @@ def main(argv=None):
     ap.add_argument("--sample-ids", default="", help="쉼표로 구분한 post_id만 상세 수집 (시험용)")
     ap.add_argument("--reuse-list", action="store_true", help="이전 list.json이 있으면 목록 재수집 생략")
     ap.add_argument("--exclude-csv", default="", help="이 CSV에 있는 같은 게시판 post_id는 건너뜀 (델타 수집)")
+    ap.add_argument("--ocr-existing", action="store_true", help="기존 image_only 행을 OCR로 갱신하고 CSV를 다시 씀")
     args = ap.parse_args(argv)
 
     if args.board not in BOARD_BY_ID:
@@ -395,6 +466,13 @@ def main(argv=None):
 
     session = make_session()
     session.get(LIST_URL + f"?brd={args.board}", timeout=TIMEOUT)  # CYBER 쿠키 확보
+
+    if args.ocr_existing:
+        ocr_existing(session, out_dir, raw_dir, log=log)
+        rows = load_jsonl(os.path.join(out_dir, "details.jsonl"))
+        path, n = write_csv(out_dir, rows, f"{name}.csv")
+        log(f"✓ 저장 {path} ({n}행)")
+        return 0
 
     list_path = os.path.join(out_dir, "list.json")
     if args.reuse_list and os.path.exists(list_path):
