@@ -512,6 +512,25 @@ def ocr_existing(session, out_dir, raw_dir, log=print):
     return changed
 
 
+EMPTY_TEXT = {"", "nan", "본문 조회 실패"}
+
+
+def old_post_ids(path, board_name):
+    """기존 CSV의 같은 게시판에서 (본문 있는 post_id 집합, 본문 빈 post_id 집합)을 돌려준다."""
+    import csv as _csv
+    _csv.field_size_limit(sys.maxsize)
+    with_text, empty = set(), set()
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for r in _csv.DictReader(f):
+            if r.get("board_name") != board_name:
+                continue
+            m = re.search(r"post=(\d+)", r.get("url") or "")
+            if not m:
+                continue
+            (empty if (r.get("text") or "").strip() in EMPTY_TEXT else with_text).add(int(m.group(1)))
+    return with_text, empty - with_text
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
@@ -520,7 +539,8 @@ def main(argv=None):
     ap.add_argument("--no-details", action="store_true", help="목록만 수집")
     ap.add_argument("--sample-ids", default="", help="쉼표로 구분한 post_id만 상세 수집 (시험용)")
     ap.add_argument("--reuse-list", action="store_true", help="이전 list.json이 있으면 목록 재수집 생략")
-    ap.add_argument("--exclude-csv", default="", help="이 CSV에 있는 같은 게시판 post_id는 건너뜀 (델타 수집)")
+    ap.add_argument("--exclude-csv", default="", help="이 CSV에 본문이 있는 같은 게시판 post_id는 건너뜀 (델타 수집, 본문이 비었던 글은 다시 받음)")
+    ap.add_argument("--refetch-empty", default="", help="이 CSV에서 본문이 비어 있던 같은 게시판 post_id만 다시 수집")
     ap.add_argument("--ocr-existing", action="store_true", help="기존 image_only 행을 OCR로 갱신하고 CSV를 다시 씀")
     ap.add_argument("--backfill-reasons", action="store_true",
                     help="--from-dir의 기존 수집분에 fail_code를 채워 --out에 새 details.jsonl/CSV를 씀 (원본 raw는 읽기만)")
@@ -581,15 +601,17 @@ def main(argv=None):
         keep = {int(x) for x in args.sample_ids.split(",") if x.strip()}
         items = [it for it in items if it["post_id"] in keep]
 
-    if args.exclude_csv:
-        # 기존 CSV에 이미 있는 post_id(같은 게시판)는 건너뛴다 (델타 수집)
-        import pandas as pd
-        old = pd.read_csv(args.exclude_csv, encoding="utf-8-sig", engine="python", on_bad_lines="warn")
-        old = old[old["board_name"] == name]
-        old_ids = set(old["url"].astype(str).str.extract(r"post=(\d+)")[0].dropna().astype(int))
+    if args.exclude_csv or args.refetch_empty:
+        # 기존 CSV 기준. --exclude-csv: 본문이 있는 post_id만 건너뛴다 (본문이 비었던 글은 다시 받음).
+        # --refetch-empty: 기존 CSV에서 본문이 비어 있던 post_id만 다시 받는다.
+        with_text, empty = old_post_ids(args.exclude_csv or args.refetch_empty, name)
         before = len(items)
-        items = [it for it in items if it["post_id"] not in old_ids]
-        log(f"  기존 CSV 제외: {before}건 → {len(items)}건 남음 (기존 {len(old_ids)}건)")
+        if args.refetch_empty:
+            items = [it for it in items if it["post_id"] in empty]
+            log(f"  기존 빈 본문 재수집: 목록 {before}건 중 {len(items)}건 (기존 빈 본문 {len(empty)}건)")
+        else:
+            items = [it for it in items if it["post_id"] not in with_text]
+            log(f"  기존 CSV 본문 있는 {len(with_text)}건 제외: {before}건 → {len(items)}건 남음")
 
     failed = run_details(session, items, out_dir, raw_dir, log=log)
     rows = load_jsonl(os.path.join(out_dir, "details.jsonl"))
