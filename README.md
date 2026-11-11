@@ -56,6 +56,7 @@ pip install -r requirements.txt
 
 ## 참고 문서
 
+- [notebooks/reinforce_dp.ipynb](notebooks/reinforce_dp.ipynb): 더불어민주당 CSV 본문 보완·정제 노트북 (이전 작업)
 - [docs/diagnosis.md](docs/diagnosis.md): 2026-11 업데이트 시점의 누락 진단 (과거 기록)
 
 ## 데이터 취급
