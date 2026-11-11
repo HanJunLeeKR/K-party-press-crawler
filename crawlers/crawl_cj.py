@@ -40,6 +40,7 @@ PARTY_NAME = "조국혁신당"
 BOARDS = {
     "기자회견문": 6,
     "논평브리핑": 7,
+    "정책 브리핑": 8,
     "보도자료": 9,
 }
 
@@ -158,6 +159,7 @@ def to_row(board_name, item):
 BOARD_PATHS = {
     "기자회견문": "press-conference",
     "논평브리핑": "commentary-briefing",
+    "정책 브리핑": "policy-briefing",
     "보도자료": "press-release",
 }
 

@@ -10,13 +10,13 @@
 
 | 정당 | 파일 | 게시판 |
 |---|---|---|
-| 더불어민주당 | `crawlers/crawl_dp.py` | 보도자료(188), 논평·브리핑(11), 모두발언(230) |
-| 국민의힘 | `crawlers/crawl_ppp.py` | 대변인 논평·보도자료(BBSDD0001), 원내 보도자료(BBSDD0002), 미디어특위(BBSDD0042) |
-| 조국혁신당 | `crawlers/crawl_cj.py` | 기자회견문, 논평브리핑, 보도자료 |
+| 더불어민주당 | `crawlers/crawl_dp.py` | 보도자료(188), 논평·브리핑(11), 모두발언(230), 정책브리핑(13) |
+| 국민의힘 | `crawlers/crawl_ppp.py` | 대변인 논평·보도자료(BBSDD0001), 원내 보도자료(BBSDD0002), 정책위(BBSDD0003), 미디어위원회(BBSDD0042, 과거 미디어특위) |
+| 조국혁신당 | `crawlers/crawl_cj.py` | 기자회견문, 논평브리핑, 정책 브리핑, 보도자료 |
 | 개혁신당 | `crawlers/crawl_reform.py` | 논평·브리핑(briefing), 보도자료(press) |
 | 기본소득당 | `crawlers/crawl_basicincome.py` | 논평·보도자료 |
 | 사회민주당 | `crawlers/crawl_sdp.py` | 브리핑 (논평성명·브리핑·보도자료, SNS는 기본 제외) |
-| 진보당 | `crawlers/crawl_jinbo.py` | 보도자료, 논평, 모두발언 |
+| 진보당 | `crawlers/crawl_jinbo.py` | 보도자료, 논평, 모두발언, 정책논평 |
 
 ```bash
 python crawlers/crawl_sdp.py --out ./out

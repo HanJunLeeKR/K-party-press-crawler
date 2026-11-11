@@ -46,6 +46,7 @@ BOARDS = {
     "보도자료": 188,
     "논평_브리핑": 11,
     "모두발언": 230,
+    "정책브리핑": 13,
 }
 BOARD_BY_ID = {v: k for k, v in BOARDS.items()}
 

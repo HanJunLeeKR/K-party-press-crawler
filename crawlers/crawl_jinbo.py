@@ -22,7 +22,7 @@ import requests
 from bs4 import BeautifulSoup
 
 SITE = "https://jinboparty.com"
-BOARDS = {"보도자료": (286, "b_1_111"), "논평": (15, "b_1_2"), "모두발언": (315, "b_1_125")}
+BOARDS = {"보도자료": (286, "b_1_111"), "논평": (15, "b_1_2"), "모두발언": (315, "b_1_125"), "정책논평": (316, "b_1_126")}
 TIMEOUT = (10, 60)
 MAX_RETRIES = 4
 WORKERS = 3
@@ -123,10 +123,10 @@ def fetch_list_page(session, board, page, raw_dir):
     return parse_list(r.text, board)
 
 
-def walk_list(session, raw_dir, log=print):
+def walk_list(session, raw_dir, log=print, boards=None):
     """게시판별로 새 ID가 없는 쪽(범위 초과로 마지막 쪽이 반복됨)이 나올 때까지 순차 수집."""
     got, failed_pages = {}, []
-    for board in BOARDS:
+    for board in (boards or BOARDS):
         seen, page, bad = set(), 1, 0
         while True:
             try:
@@ -337,6 +337,7 @@ def main(argv=None):
     ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--until", type=ymd, default=None, help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--exclude-csv", default="")
+    ap.add_argument("--boards", nargs="*", default=None, choices=list(BOARDS), help="수집할 게시판 (기본: 전체)")
     args = ap.parse_args(argv)
     log = lambda m: print(m, file=sys.stderr, flush=True)
 
@@ -345,7 +346,7 @@ def main(argv=None):
     os.makedirs(out_dir, exist_ok=True)
     session = make_session()
     log("[진보당] 목록 수집")
-    items, failed_pages = walk_list(session, raw_dir, log=log)
+    items, failed_pages = walk_list(session, raw_dir, log=log, boards=args.boards)
     labels = {}
     for it in items:
         labels[it["board_name"]] = labels.get(it["board_name"], 0) + 1
