@@ -214,6 +214,12 @@ def main():
     o.loc[o["url"].isin(repaired_urls), "source"] = "기존 CSV(URL 복원, 본문 32,767자에서 잘림)"
     log["url_repaired_rows"] = len(repaired)
     n = frame(delta, P, "v2_delta")
+    # 기존 CSV에서 본문이 비어 있던 글을 첨부파일 추출 수집기로 다시 받은 결과 (있으면 합친다)
+    refetch = sorted(glob.glob(f"{W}/step9/refetch/*/*.csv"))
+    if refetch:
+        r = pd.concat([rd(f) for f in refetch], ignore_index=True)
+        n = pd.concat([n, frame(r, P, "dp_refetch")], ignore_index=True)
+        log["refetch_rows"] = len(r)
     o["post_id"] = [key_of(P, r) or "" for _, r in o.iterrows()]
     m = merge_two(P, o, n, log)
     m = finalize(m, P)
