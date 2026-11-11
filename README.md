@@ -22,12 +22,13 @@
 python crawlers/crawl_sdp.py --out ./out
 python crawlers/crawl_dp.py --out ./out --board 188        # 게시판 번호를 지정
 python crawlers/crawl_ppp.py --out ./out --board all
-python crawlers/crawl_cj.py --out ./out --start 2025-01-01 --end 2025-12-31
+python crawlers/crawl_jinbo.py --out ./out --since 2025-01-01 --until 2025-12-31   # 기간 지정
+python crawlers/crawl_cj.py --out ./out --since 2025-01-01 --until 2025-12-31
 ```
 
 ### 기간 지정과 빈 곳 채우기
 
-- **기간 지정:** 현재 `--start`/`--end` 옵션은 조국혁신당 수집기만 지원합니다. 다른 정당은 전체를 수집하므로 수집 후 `date` 컬럼으로 거르세요. (모든 정당에 기간 옵션을 넣는 작업은 계획 중입니다.)
+- **기간 지정:** 모든 수집기가 `--since YYYY-MM-DD`와 `--until YYYY-MM-DD`(양끝 포함)를 지원합니다. 목록에서 날짜로 거른 뒤 해당 글만 상세 수집하므로 시간이 크게 줄고, `list.json`에는 전체 목록이 그대로 남습니다. 목록에 날짜가 없는 글은 기간을 확인할 수 없어 제외됩니다. (조국혁신당은 기존 `--start`/`--end`도 계속 쓸 수 있습니다.) 더불어민주당 옛 글 중에는 날짜가 `2003-11-11`로 일괄 표시된 것이 많으니, 옛 기간을 지정할 때 유의하세요.
 - **빈 곳 채우기·증분 수집:** 국민의힘, 기본소득당, 사회민주당, 진보당, 더불어민주당은 `--exclude-csv 기존.csv`를 지원합니다. 기존 CSV에 본문이 있는 글은 건너뛰고, 새 글과 본문이 비어 있던 글만 받습니다. 기존 CSV에는 `url`과 `text` 컬럼(더불어민주당은 `board_name`도)이 있어야 합니다. 결과에는 새로 받은 행만 들어 있습니다.
 - 더불어민주당은 기존 CSV에서 본문이 비어 있던 글만 다시 받는 `--refetch-empty 기존.csv`도 있습니다.
 - 첨부파일이나 이미지에 글자가 없는 글은 다시 받아도 비어 있습니다. 이유는 `fail_reason`에 기록됩니다.

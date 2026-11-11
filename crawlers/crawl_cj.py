@@ -166,8 +166,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True, help="출력 폴더 (CSV와 raw JSON이 저장됨)")
     ap.add_argument("--boards", nargs="*", default=list(BOARDS), help="수집할 게시판 이름")
-    ap.add_argument("--start", default="2024-03-04", help="이 날짜 이전 글은 제외 (YYYY-MM-DD)")
-    ap.add_argument("--end", default="2100-01-01", help="이 날짜 이후 글은 제외 (YYYY-MM-DD)")
+    ap.add_argument("--since", "--start", dest="start", default="2024-03-04", help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
+    ap.add_argument("--until", "--end", dest="end", default="2100-01-01", help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
     args = ap.parse_args(argv)
 
     out_dir = args.out

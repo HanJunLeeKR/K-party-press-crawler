@@ -373,11 +373,38 @@ def write_csv(out_dir, rows, name):
     return path, len(last)
 
 
+def ymd(s):
+    """argparse용 날짜 검증: YYYY-MM-DD."""
+    try:
+        datetime.strptime(s, "%Y-%m-%d")
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"날짜는 YYYY-MM-DD 형식이어야 합니다: {s!r}")
+    return s
+
+
+def filter_period(items, since, until, log=print):
+    """기간(양끝 포함)으로 목록 항목을 거른다. 목록에 날짜가 없는 글은 기간을 확인할 수 없어 제외한다."""
+    if not since and not until:
+        return items
+    kept, undated = [], 0
+    for it in items:
+        d = it.get("date") or ""
+        if not d:
+            undated += 1
+        elif (not since or d >= since) and (not until or d <= until):
+            kept.append(it)
+    log(f"  기간 {since or '처음'} ~ {until or '끝'}: {len(items)}건 → {len(kept)}건"
+        + (f" (날짜 없는 {undated}건 제외)" if undated else ""))
+    return kept
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--board", choices=list(BOARDS) + ["all"], default="all")
     ap.add_argument("--no-details", action="store_true", help="목록만 수집")
+    ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
+    ap.add_argument("--until", type=ymd, default=None, help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--exclude-csv", default="", help="기존 CSV: 본문 있는 항목은 건너뛰고 빈 본문 항목은 다시 받음")
     args = ap.parse_args(argv)
 
@@ -401,6 +428,7 @@ def main(argv=None):
         items, failed_pages = walk_list(session, bid, raw_dir, log=log)
         with open(os.path.join(out_dir, "list.json"), "w", encoding="utf-8") as f:
             json.dump(items, f, ensure_ascii=False)
+        items = filter_period(items, args.since, args.until, log=log)
         if args.no_details:
             continue
         if args.exclude_csv:
