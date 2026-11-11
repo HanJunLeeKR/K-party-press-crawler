@@ -1,340 +1,427 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-국민의힘 크롤러 - 완전판 v2
-- 원래 requests 기반 (빠름)
-- 500페이지마다 세션 재생성 (메모리 정리)
-- 재시도 로직 (3회)
-- 실패한 페이지 건너뛰기
-- ★ 빈 페이지 3회 연속 감지 → 자동 종료 (NEW!)
+국민의힘(peoplepowerparty.kr) 보도자료 수집기 (v2)
+
+이전 버전의 문제 (docs/diagnosis.md)
+- 빈 본문 376건: HTTP 200 응답이 왔는데 본문이 비었고, 요청 실패와 구분하지 않아 재시도 대상에서 빠졌다.
+  여기서는 본문 공란을 '실패'로 기록하고 재수집 대상으로 다시 넣는다.
+- 첫 요청 연결 리셋: 재시도 간격을 늘리고(2초 단위 증가), 실패 건은 재시도 큐 3라운드 뒤에 fetch_failed로 남긴다.
+- 307 리다이렉트: requests.Session으로 쿠키를 유지한다 (DP와 같은 문제).
+- 조기 종료: 빈 페이지가 연속 2번 나와야 목록 순회를 끝낸다. 마지막 페이지는 이진 탐색으로 확인한다.
+
+수집 방식
+- 목록: /news/comment/{bid}?page=N (행 10개). 원본 HTML은 raw/list 에 보존한다.
+- 상세: /news/comment_view/{bid}/{id}. 본문은 dd.conts (hwpEditorBoardContent가 있으면 그 안).
+- 델타 모드(--exclude-csv): 기존 CSV에 본문이 있는 post는 건너뛰고, 본문이 비었던 post는 다시 받는다.
+
+사용
+  python crawl_ppp.py --out ./out                                   # 전체 목록 + 전체 상세
+  python crawl_ppp.py --out ./out --exclude-csv 국민의힘.csv        # 기존 파일에 없는 것 + 빈 본문만
+  python crawl_ppp.py --out ./out --no-details                      # 목록만
 """
 
+import argparse
+import base64
+import csv
+import gzip
+import json
 import os
-import time
-import re
 import random
+import re
+import sys
+import time
+import concurrent.futures
 from datetime import datetime
-import pandas as pd
-from tqdm import tqdm
+from urllib.parse import urljoin, urlparse
+
+import subprocess
+
 import requests
 from bs4 import BeautifulSoup
 
-def parse_date(date_str):
-    try:
-        return datetime.strptime(date_str.strip(), '%Y-%m-%d')
-    except:
-        return None
+SITE = "https://www.peoplepowerparty.kr"
+BOARDS = {
+    # 게시판 ID: 기존 CSV의 board_name
+    "BBSDD0001": "대변인_논평보도자료",
+    "BBSDD0002": "원내_보도자료",
+    "BBSDD0042": "미디어특위_보도자료",
+}
+TIMEOUT = (10, 60)
+MAX_RETRIES = 3
+WORKERS = 3
+DATE_RE = re.compile(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})")
+ZERO_WIDTH = re.compile(r"[​‌‍﻿\xa0]")
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)",
+    "Accept-Language": "ko-KR,ko;q=0.9",
+}
 
-def create_session():
-    """세션 생성 (연결 재사용으로 속도 향상)"""
-    session = requests.Session()
-    session.headers.update({
-        'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'ko-KR,ko;q=0.9',
-    })
-    return session
+SUCCESS_STATUS = {"ok", "image_ocr"}
+REASON_TEXT = {
+    "no_body": "본문·이미지 모두 없음 (빈 게시물)",
+    "image_only_ocr_empty": "본문이 이미지뿐이며 OCR 텍스트 없음 (글자 없는 사진·도표 등)",
+    "image_download_failed": "본문 이미지 다운로드 실패 (외부 서버 오류 등)",
+    "image_no_src": "본문 이미지 주소(src) 없음",
+    "fetch_failed": "상세 페이지 요청 실패 (재시도 후에도 실패)",
+    "list_failed": "목록 페이지 요청 실패 (재시도 후에도 실패)",
+}
 
-def get_with_retry(session, url, max_retries=3, timeout=10):
-    """재시도 로직"""
-    for attempt in range(max_retries):
+
+class FetchError(RuntimeError):
+    pass
+
+
+def make_session():
+    s = requests.Session()  # 쿠키 유지 (307 리다이렉트 통과)
+    s.headers.update(HEADERS)
+    return s
+
+
+def get(session, url, **kw):
+    last = None
+    for attempt in range(1, MAX_RETRIES + 1):
         try:
-            response = session.get(url, timeout=timeout)
-            response.raise_for_status()
-            return response
-        except Exception as e:
-            if attempt < max_retries - 1:
-                time.sleep(1)
-            else:
-                return None
-    return None
+            r = session.get(url, timeout=TIMEOUT, **kw)
+            r.raise_for_status()
+            return r
+        except requests.RequestException as e:
+            last = e
+            time.sleep(2 * attempt)  # 연결 리셋 대비 간격을 늘린다
+    raise FetchError(f"GET 실패 {url}: {last}")
 
-def collect_press_list(base_url, board_id, board_name,
-                       start_date_str, end_date_str, max_pages=10000):
 
-    start_date = datetime.strptime(start_date_str, '%Y-%m-%d')
-    end_date = datetime.strptime(end_date_str, '%Y-%m-%d')
+def reason_text(status, fail_code=""):
+    if status in SUCCESS_STATUS:
+        return ""
+    code = fail_code or status
+    return REASON_TEXT.get(code, "기타: " + str(status))
 
-    data = []
-    page_num = 1
-    session = None
-    consecutive_errors = 0
-    max_consecutive_errors = 10
 
-    # ★ NEW: 빈 페이지 감지
-    empty_pages = 0
-    max_empty_pages = 3  # 연속 3페이지 비어있으면 종료
+def clean(text):
+    return ZERO_WIDTH.sub("", text).strip()
 
-    print(f"\n▶ [{board_name}] 목록 수집 시작...")
-    pbar = tqdm(desc=f"[{board_name}]", unit="페이지")
 
-    while page_num <= max_pages:
-        # 500페이지마다 세션 재생성
-        if (page_num - 1) % 500 == 0:
-            if session:
-                session.close()
-                pbar.write(f"  🔄 {page_num}페이지: 세션 재생성 (메모리 정리)")
-            session = create_session()
+def norm_date(s):
+    m = DATE_RE.search(s or "")
+    if not m:
+        return ""
+    y, mo, d = m.groups()
+    return f"{int(y):04d}-{int(mo):02d}-{int(d):02d}"
 
-        pbar.update(1)
-        pbar.set_postfix({"수집": len(data), "페이지": page_num})
 
-        url = f"{base_url}/news/comment/{board_id}?page={page_num}"
-
-        # 랜덤 대기 (0.5-1.5초)
-        time.sleep(random.uniform(0.5, 1.5))
-
-        # 재시도 로직으로 요청
-        response = get_with_retry(session, url, max_retries=3, timeout=10)
-
-        if not response:
-            consecutive_errors += 1
-            pbar.write(f"  ✗ 페이지 {page_num} 실패 (연속 {consecutive_errors}회)")
-
-            if consecutive_errors >= max_consecutive_errors:
-                pbar.write(f"  ⚠ 연속 {consecutive_errors}회 실패. 수집 종료.")
-                break
-
-            page_num += 1
+def parse_list(html, bid):
+    """목록 한 페이지. 반환: [{post_id, bid, url, title, section, date}]"""
+    soup = BeautifulSoup(html, "html.parser")
+    tbl = soup.find("div", class_="board-tbl")
+    if tbl is None or tbl.find("tbody") is None:
+        return []
+    out = []
+    for tr in tbl.find("tbody").find_all("tr"):
+        a = tr.find("a", href=True)
+        if a is None:
             continue
-
-        # 성공하면 연속 오류 카운터 리셋
-        consecutive_errors = 0
-
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        table_div = soup.find('div', {'class': 'board-tbl'})
-        if not table_div:
-            empty_pages += 1
-            pbar.write(f"  ⚠ board-tbl 없음 (페이지 {page_num}) [빈 페이지 {empty_pages}/3]")
-
-            if empty_pages >= max_empty_pages:
-                pbar.write(f"  📭 연속 {empty_pages}페이지 비어있음 → 데이터 끝으로 판단, 수집 종료")
-                break
-
-            page_num += 1
+        m = re.search(rf"/comment_view/{bid}/(\d+)", a["href"])
+        if not m:
             continue
+        sec = tr.find("td", class_="class")
+        dt = tr.find("td", class_="date")
+        out.append({
+            "post_id": int(m.group(1)),
+            "bid": bid,
+            "url": urljoin(SITE, f"/news/comment_view/{bid}/{m.group(1)}"),
+            "title": clean(a.get_text(" ", strip=True)),
+            "section": clean(sec.get_text(" ", strip=True)) if sec else "",
+            "date": norm_date(dt.get_text(" ", strip=True)) if dt else "",
+        })
+    return out
 
-        tbody = table_div.find('tbody')
-        if not tbody:
-            empty_pages += 1
-            pbar.write(f"  ⚠ tbody 없음 (페이지 {page_num}) [빈 페이지 {empty_pages}/3]")
 
-            if empty_pages >= max_empty_pages:
-                pbar.write(f"  📭 연속 {empty_pages}페이지 비어있음 → 데이터 끝으로 판단, 수집 종료")
-                break
+def last_page(session, bid):
+    """목록의 마지막 비어 있지 않은 페이지를 이진 탐색으로 찾는다."""
+    def has_rows(p):
+        return len(parse_list(get(session, f"{SITE}/news/comment/{bid}", params={"page": p}).text, bid)) > 0
+    lo, hi = 1, 2
+    while has_rows(hi):
+        lo, hi = hi, hi * 2
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if has_rows(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo
 
-            page_num += 1
-            continue
 
-        rows = tbody.find_all('tr')
-        if not rows or len(rows) == 0:
-            empty_pages += 1
-            pbar.write(f"  ⚠ 게시글 없음 (페이지 {page_num}) [빈 페이지 {empty_pages}/3]")
+def fetch_list_page(session, bid, page, raw_dir):
+    r = get(session, f"{SITE}/news/comment/{bid}", params={"page": page})
+    os.makedirs(os.path.join(raw_dir, "list"), exist_ok=True)
+    with gzip.open(os.path.join(raw_dir, "list", f"{bid}_p{page}.html.gz"), "wt", encoding="utf-8") as f:
+        f.write(r.text)
+    return parse_list(r.text, bid)
 
-            if empty_pages >= max_empty_pages:
-                pbar.write(f"  📭 연속 {empty_pages}페이지 비어있음 → 데이터 끝으로 판단, 수집 종료")
-                break
 
-            page_num += 1
-            continue
+def walk_list(session, bid, raw_dir, log=print):
+    """마지막 페이지까지 병렬로 받고, 실패한 페이지는 한 번 더 받는다. post_id 기준 중복 제거."""
+    last = last_page(session, bid)
+    log(f"  [{BOARDS[bid]}] 마지막 페이지 {last} (약 {last * 10}건 이하)")
+    pages = list(range(1, last + 1))
+    got, failed_pages = {}, []
 
-        # ★ 데이터가 있으면 빈 페이지 카운터 리셋
-        empty_pages = 0
+    def work(p):
+        time.sleep(random.uniform(0.2, 0.5))
+        try:
+            return p, fetch_list_page(session, bid, p, raw_dir), None
+        except (FetchError, requests.RequestException, OSError) as e:
+            return p, None, e
 
-        # 데이터 추출
-        stop_flag = False
-
-        for row in rows:
-            cols = row.find_all('td')
-            if len(cols) < 3:
-                continue
-
-            try:
-                no_td = row.find('td', {'class': 'no'})
-                class_td = row.find('td', {'class': 'class'})
-
-                no = no_td.get_text(strip=True) if no_td else cols[0].get_text(strip=True)
-                section = class_td.get_text(strip=True) if class_td else cols[1].get_text(strip=True)
-
-                link_tag = row.find('a')
-                if not link_tag:
+    for rnd in range(2):
+        todo = pages if rnd == 0 else failed_pages
+        failed_pages = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+            for p, rows, err in pool.map(work, todo):
+                if rows is None:
+                    failed_pages.append(p)
                     continue
-
-                title = link_tag.get_text(strip=True).replace('\n', ' ')
-                article_url = base_url + link_tag['href']
-
-                date_str = ""
-                if len(cols) >= 4:
-                    date_str = cols[3].get_text(strip=True)
-
-                if not date_str or not re.match(r'\d{4}-\d{2}-\d{2}', date_str):
-                    dd_date = row.find('dd', {'class': 'date'})
-                    if dd_date:
-                        span = dd_date.find('span')
-                        if span:
-                            span.decompose()
-                        date_str = dd_date.get_text(strip=True)
-
-                article_date = parse_date(date_str)
-
-                if not article_date:
-                    continue
-                if article_date < start_date:
-                    stop_flag = True
-                    break
-                if article_date > end_date:
-                    continue
-
-                data.append({
-                    'no': no,
-                    'section': section,
-                    'title': title,
-                    'date': date_str,
-                    'url': article_url,
-                    'board_name': board_name
-                })
-            except:
-                continue
-
-        if stop_flag:
-            pbar.write(f"  📅 시작 날짜({start_date_str}) 이전 도달 → 수집 종료")
+                for row in rows:
+                    got.setdefault(row["post_id"], row)
+        if not failed_pages:
             break
+        log(f"  목록 라운드 {rnd} 실패 {len(failed_pages)}쪽 → 재시도")
+        time.sleep(20)
+    if failed_pages:
+        log(f"  ⚠ 끝내 실패한 목록 페이지: {failed_pages}")
+    items = sorted(got.values(), key=lambda x: x["post_id"])
+    log(f"  [{BOARDS[bid]}] 고유 {len(items)}건 (목록 실패 페이지 {len(failed_pages)})")
+    return items, failed_pages
 
-        page_num += 1
 
-    if session:
-        session.close()
-    pbar.close()
+def ocr_images(session, conts, post_id, img_dir, max_images=30):
+    """본문 이미지 OCR (tesseract kor+eng). 반환: (텍스트, 이미지 주소 수, 다운로드 성공 수)"""
+    srcs = [img["src"] for img in conts.find_all("img", src=True)]
+    if not srcs:
+        return "", 0, 0
+    os.makedirs(img_dir, exist_ok=True)
+    texts, downloaded = [], 0
+    for n, src in enumerate(srcs[:max_images], 1):
+        if src.startswith("data:image/"):
+            # 본문에 base64로 직접 넣은 이미지: 디코딩해서 저장
+            head, _, b64 = src.partition(",")
+            ext = "." + head.split("/")[1].split(";")[0].replace("jpeg", "jpg")
+            try:
+                content = base64.b64decode(b64)
+            except (ValueError, TypeError):
+                continue
+        else:
+            try:
+                content = get(session, urljoin(SITE, src)).content
+            except FetchError:
+                continue
+            ext = os.path.splitext(urlparse(urljoin(SITE, src)).path)[1].lower() or ".jpg"
+        path = os.path.join(img_dir, f"{post_id}_{n}{ext}")
+        with open(path, "wb") as f:
+            f.write(content)
+        downloaded += 1
+        try:
+            res = subprocess.run(["tesseract", path, "-", "-l", "kor+eng", "--psm", "3"],
+                                 capture_output=True, timeout=180)
+            t = clean(res.stdout.decode("utf-8", errors="ignore"))
+        except (OSError, subprocess.SubprocessError):
+            t = ""
+        if t:
+            texts.append(t)
+    return "\n".join(texts), len(srcs), downloaded
 
-    print(f"✓ [{board_name}] 총 {len(data)}개 수집 (마지막 페이지: {page_num - 1})")
-    return data
 
-def clean_text(text):
-    text = text.replace('\xa0', '').replace('\u200b', '').replace('​', '')
-    return text.strip()
+def extract_body(soup):
+    """본문 텍스트. hwpEditorBoardContent 칸이 비어 있는 게시물이 있어서(본문이 칸 밖에 있음)
+    칸에 글이 없으면 dd.conts 전체 텍스트를 쓴다."""
+    conts = soup.select_one("dd.conts")
+    if conts is None:
+        return None
+    hwp = conts.find("div", {"id": "hwpEditorBoardContent"})
+    if hwp is not None:
+        t = clean(hwp.get_text("\n", strip=True))
+        if len(t) >= 5:
+            return t
+    return clean(conts.get_text("\n", strip=True))
 
-def collect_press_detail(session, url):
-    try:
-        response = get_with_retry(session, url, max_retries=2, timeout=10)
-        if not response:
-            return {'text': "본문 조회 실패", 'writer': ""}
 
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        text_parts = []
-        writer = ""
-
-        conts_tag = soup.select_one('dd.conts')
-
-        if conts_tag:
-            hwp_div = conts_tag.find('div', {'id': 'hwpEditorBoardContent'})
-            if hwp_div:
-                hwp_div.decompose()
-
-            p_tags = conts_tag.find_all('p')
-
-            for p in p_tags:
-                style = p.get('style', '')
-                is_center = 'text-align:center' in style.replace(' ', '').lower()
-
-                raw_text = p.get_text(strip=True)
-                cleaned_text = clean_text(raw_text)
-
-                if not cleaned_text:
-                    continue
-
-                if is_center:
-                    if not re.match(r'\d{4}\.\s*\d{1,2}\.\s*\d{1,2}', cleaned_text):
-                        writer = cleaned_text
-                else:
-                    text_parts.append(cleaned_text)
-
-        return {'text': '\n'.join(text_parts), 'writer': writer}
-    except:
-        return {'text': "본문 조회 오류", 'writer': ""}
-
-def main():
-    print("\n" + "="*60)
-    print("국민의힘 보도자료 수집 - 완전판 v2")
-    print("- requests 기반 (빠른 속도)")
-    print("- 500페이지마다 세션 재생성")
-    print("- 재시도 로직 (3회)")
-    print("- 실패 페이지 건너뛰기")
-    print("- ★ 빈 페이지 3회 연속 → 자동 종료")
-    print("="*60)
-
-    party_name = "국민의힘"
-    base_url = "https://www.peoplepowerparty.kr"
-
-    party_boards = {
-        "대변인_논평보도자료": "BBSDD0001",
-        "원내_보도자료": "BBSDD0002",
-        "미디어특위_보도자료": "BBSDD0042",
+def fetch_detail(session, item, raw_dir):
+    r = get(session, item["url"])
+    soup = BeautifulSoup(r.text, "html.parser")
+    body = extract_body(soup)
+    if body is None:
+        raise FetchError("dd.conts 없음 (응답 이상)")
+    os.makedirs(os.path.join(raw_dir, "detail"), exist_ok=True)
+    with gzip.open(os.path.join(raw_dir, "detail", f"{item['bid']}_{item['post_id']}.html.gz"), "wt", encoding="utf-8") as f:
+        f.write(r.text)
+    dd = soup.select_one("dd.date")
+    pub = norm_date(dd.get_text(" ", strip=True)) if dd else ""
+    fail_code = ""
+    if len(body) >= 5:
+        status, text = "ok", body
+    else:
+        status, text = "no_body", ""
+        conts = soup.select_one("dd.conts")
+        if conts is not None and conts.find("img"):
+            ocr, total, downloaded = ocr_images(session, conts, item["post_id"], os.path.join(raw_dir, "images"))
+            if ocr:
+                status, text = "image_ocr", ocr
+            else:
+                status = "image_only_ocr_empty"
+                fail_code = ("image_no_src" if total == 0 else
+                             "image_download_failed" if downloaded == 0 else "image_only_ocr_empty")
+    return {
+        **item,
+        "pub_date": pub,
+        "date_mismatch": bool(pub and item["date"] and pub != item["date"]),
+        "text": text,
+        "status": status,
+        "fail_code": fail_code,
+        "fetched_at": datetime.now().isoformat(timespec="seconds"),
     }
 
-    start_date = "2000-03-10"
-    end_date = "2026-02-03"
-    output_path = "/Users/hanjunlee/Downloads/국민의힘_완전판_v2"
 
-    all_dfs = []
+def load_jsonl(path):
+    if not os.path.exists(path):
+        return []
+    rows = []
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            try:
+                rows.append(json.loads(line))
+            except ValueError:
+                pass
+    return rows
 
-    for board_name, board_id in party_boards.items():
-        # 목록 수집
-        press_list = collect_press_list(
-            base_url, board_id, board_name,
-            start_date, end_date, max_pages=10000
-        )
 
-        if not press_list:
+def run_details(session, items, out_dir, raw_dir, log=print):
+    """체크포인트(JSONL) 기반. 완료 건은 건너뛴다. 실패는 재시도 3라운드."""
+    ck = os.path.join(out_dir, "details.jsonl")
+    done = {r["post_id"] for r in load_jsonl(ck) if r.get("status") in SUCCESS_STATUS | {"no_body"}}
+    todo = [it for it in items if it["post_id"] not in done]
+    log(f"  상세 대상 {len(todo)}건 (완료 {len(done)}건 건너뜀)")
+
+    def work(it):
+        time.sleep(random.uniform(0.3, 0.8))
+        try:
+            return it, fetch_detail(session, it, raw_dir), None
+        except (FetchError, requests.RequestException, OSError) as e:
+            return it, None, e
+
+    failed = []
+    with open(ck, "a", encoding="utf-8") as out, \
+            concurrent.futures.ThreadPoolExecutor(max_workers=WORKERS) as pool:
+        for rnd in range(3):
+            queue = todo if rnd == 0 else failed
+            failed = []
+            for i, (it, rec, err) in enumerate(pool.map(work, queue), 1):
+                if rec is None:
+                    failed.append(it)
+                    continue
+                out.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                out.flush()
+                if i % 200 == 0:
+                    log(f"    round {rnd}: {i}/{len(queue)}")
+            if not failed:
+                break
+            log(f"  라운드 {rnd} 실패 {len(failed)}건 → 재시도")
+            time.sleep(30)
+        for it in failed:
+            out.write(json.dumps({**it, "pub_date": "", "date_mismatch": False, "text": "",
+                                  "status": "fetch_failed",
+                                  "fetched_at": datetime.now().isoformat(timespec="seconds")},
+                                 ensure_ascii=False) + "\n")
+    return len(failed)
+
+
+def old_text_ids(path):
+    """기존 CSV에서 본문이 있는 post_id와 본문이 빈 post_id를 나눠 돌려준다."""
+    csv.field_size_limit(sys.maxsize)
+    ok, empty = set(), set()
+    with open(path, encoding="utf-8-sig", newline="") as f:
+        for r in csv.DictReader(f):
+            m = re.search(r"/comment_view/BBSDD\d+/(\d+)", r.get("url") or "")
+            if not m:
+                continue
+            pid = int(m.group(1))
+            t = (r.get("text") or "").strip()
+            if t and t not in ("nan", "본문 조회 실패"):
+                ok.add(pid)
+            else:
+                empty.add(pid)
+    return ok, empty
+
+
+def write_csv(out_dir, rows, name):
+    cols = ["post_id", "board_name", "title", "section", "date", "pub_date", "date_mismatch",
+            "text", "text_source", "status", "fail_reason", "url", "fetched_at"]
+    path = os.path.join(out_dir, name)
+    last = {}
+    for r in rows:
+        last[r["post_id"]] = r
+    with open(path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=cols, quoting=csv.QUOTE_ALL, extrasaction="ignore")
+        w.writeheader()
+        for r in last.values():
+            r = dict(r)
+            r["board_name"] = BOARDS.get(r.get("bid"), "")
+            r["fail_reason"] = reason_text(r.get("status", ""), r.get("fail_code", ""))
+            r["text_source"] = {"ok": "body", "image_ocr": "ocr"}.get(r.get("status", ""), "none")
+            w.writerow(r)
+    return path, len(last)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--board", choices=list(BOARDS) + ["all"], default="all")
+    ap.add_argument("--no-details", action="store_true", help="목록만 수집")
+    ap.add_argument("--exclude-csv", default="", help="기존 CSV: 본문 있는 항목은 건너뛰고 빈 본문 항목은 다시 받음")
+    args = ap.parse_args(argv)
+
+    def log(msg):
+        print(msg, file=sys.stderr, flush=True)
+
+    keep_ok, keep_empty = (set(), set())
+    if args.exclude_csv:
+        keep_ok, keep_empty = old_text_ids(args.exclude_csv)
+        log(f"  기존 CSV: 본문 있는 {len(keep_ok)}건 제외, 빈 본문 {len(keep_empty)}건 재수집")
+
+    session = make_session()
+    session.get(SITE + "/news/comment/BBSDD0001", timeout=TIMEOUT)  # 쿠키 확보
+    bids = list(BOARDS) if args.board == "all" else [args.board]
+    for bid in bids:
+        name = BOARDS[bid]
+        out_dir = os.path.join(args.out, f"ppp_{bid}")
+        raw_dir = os.path.join(out_dir, "raw")
+        os.makedirs(out_dir, exist_ok=True)
+        log(f"[{name}] 목록 수집")
+        items, failed_pages = walk_list(session, bid, raw_dir, log=log)
+        with open(os.path.join(out_dir, "list.json"), "w", encoding="utf-8") as f:
+            json.dump(items, f, ensure_ascii=False)
+        if args.no_details:
             continue
+        if args.exclude_csv:
+            before = len(items)
+            items = [it for it in items if it["post_id"] not in keep_ok]
+            log(f"  기존 CSV 제외: {before}건 → {len(items)}건 남음")
+        failed = run_details(session, items, out_dir, raw_dir, log=log)
+        rows = load_jsonl(os.path.join(out_dir, "details.jsonl"))
+        path, n = write_csv(out_dir, rows, f"{name}.csv")
+        statuses = {}
+        for r in rows:
+            statuses[r.get("status")] = statuses.get(r.get("status"), 0) + 1
+        summary = {"board": name, "bid": bid, "list_count": len(items), "rows": n,
+                   "list_failed_pages": failed_pages, "fetch_failed": failed,
+                   "status_counts": statuses,
+                   "generated_at": datetime.now().isoformat(timespec="seconds")}
+        with open(os.path.join(out_dir, "summary.json"), "w", encoding="utf-8") as f:
+            json.dump(summary, f, ensure_ascii=False, indent=2)
+        log(f"✓ 저장 {path} ({n}행) 상태: {statuses}")
+    return 0
 
-        # 상세 정보 수집
-        print(f"\n▶ [{board_name}] 본문 수집 중... ({len(press_list)}개)")
-
-        session = create_session()
-
-        for i, item in enumerate(tqdm(press_list, desc=f"[{board_name}]", unit="건"), 1):
-            # 500건마다 세션 재생성
-            if i % 500 == 0:
-                session.close()
-                session = create_session()
-
-            time.sleep(random.uniform(0.3, 0.8))
-            details = collect_press_detail(session, item['url'])
-            item['text'] = details['text']
-            item['writer'] = details['writer']
-
-        session.close()
-        print(f"✓ [{board_name}] 완료")
-
-        df = pd.DataFrame(press_list)
-        df = df[['board_name', 'no', 'title', 'section', 'date', 'writer', 'text', 'url']]
-        all_dfs.append(df)
-
-    if not all_dfs:
-        print("\n⚠️ 수집 데이터 없음")
-        return
-
-    # 저장
-    combined_df = pd.concat(all_dfs, ignore_index=True)
-    valid_df = combined_df[(combined_df['title'] != "") & (combined_df['text'] != "")]
-
-    os.makedirs(output_path, exist_ok=True)
-    timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"{party_name}_보도자료_{start_date}_{end_date}_{timestamp}.csv"
-    output_file = os.path.join(output_path, filename)
-
-    valid_df.to_csv(output_file, index=False, encoding='utf-8-sig')
-
-    print("\n" + "="*60)
-    print(f"✓ 총 {len(valid_df)}개 저장")
-    for board_name in party_boards.keys():
-        count = len(valid_df[valid_df['board_name'] == board_name])
-        print(f"  • {board_name}: {count}개")
-    print(f"✓ 저장: {output_file}")
-    print("="*60)
-    print("\n★ 완료! ★\n")
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
