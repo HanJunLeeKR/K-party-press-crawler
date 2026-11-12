@@ -1,6 +1,6 @@
 # Appendix: what was supplemented from Lim (2025)
 
-This repository and the Hugging Face dataset were collected from the parties' own websites. In one place the dataset also contains material from another published corpus:
+This repository and the Hugging Face dataset were collected from the parties' own websites. In two places the dataset contains material from another published corpus:
 
 > Lim, T. H. (2025). South Korean election campaign booklet and party statements corpora. *Scientific Data* 12, 1030. https://doi.org/10.1038/s41597-025-05220-4
 > Data: Open Science Framework, https://doi.org/10.17605/OSF.IO/RCT9Y (file `sk_party_statements_v2022.parquet`).
@@ -57,11 +57,25 @@ English glosses are ours, not official translations. Original Korean titles are 
 | 14447 | 2012-09-25 | `lim2025:conservative_14447` | Commentary on a former minister's suitability to chair a candidate's inter-Korean economic committee |
 | 25167 | 2019-05-16 | `lim2025:conservative_25167` | Commentary by the spokesperson on the government's talk of "the future" |
 
-## 2. What was *not* taken from Lim (2025)
+## 2. What was added: 513 publication dates of Democratic Party of Korea (DPK) posts
 
-- **Democratic Party of Korea dates.** On the current website 7,884 posts carry the placeholder date 2003-11-11. We restored real dates for 7,365 of them **from the signature line in the post text itself**, not from Lim (2025). Lim's corpus was used only to *check* this: for the 6,115 repaired posts whose title matches a unique row in Lim's corpus, 6,080 (99.4%) have the identical date. Lim's dates have not been copied into our data.
-- All other rows of all seven parties come from our own collection.
+On the current DPK website 7,884 posts carry the placeholder date 2003-11-11. The real dates were restored in three steps:
 
-## 3. Licence and citation
+| Method | Posts |
+|---|---|
+| Signature date at the end of the post text (our own method) | 7,363 |
+| Set by hand by the maintainer | 2 |
+| **Date taken from Lim (2025) by title match** | **513** |
+| Still at the placeholder date (no title match or ambiguous) | 6 |
 
-Please cite Lim (2025) together with this dataset if you use the 19 rows. Check the licence terms of the source corpus on its OSF page before redistributing them. (TODO: the maintainer has not yet verified these terms.)
+For the 513 posts, the title was matched to Lim's "progressive" series (492 unique matches; 21 posts with several candidates, where the date nearest to the neighbouring post identifiers was chosen). Eight of them differ by more than 60 days from the median date of the neighbouring identifiers; we kept Lim's date for all of them. These 513 dates are **not independently validated**, unlike the text-based dates (which agree with Lim's in 6,080 of 6,115 checkable cases, 99.4%).
+
+How they are marked: `date_note` = `Lim(2025) 코퍼스의 날짜로 복원(원값 2003-11-11은 사이트 일괄값 추정)`. Nothing else in these rows was changed. The list is in [`lim2025_dpk_restored_dates.csv`](lim2025_dpk_restored_dates.csv). To exclude them: `df[~df["date_note"].str.startswith("Lim(2025)", na=False)]`.
+
+## 3. What was *not* taken from Lim (2025)
+
+All other rows and fields of all seven parties come from our own collection of the party websites.
+
+## 4. Licence and citation
+
+Please cite Lim (2025) together with this dataset if you use these rows or dates. Check the licence terms of the source corpus on its OSF page before redistributing them. (TODO: the maintainer has not yet verified these terms.)
