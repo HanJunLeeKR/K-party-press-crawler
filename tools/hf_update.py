@@ -51,7 +51,11 @@ import merge_parties as M  # noqa: E402  (shared schema helpers: COLS, frame, fi
 
 CRAWLERS = os.path.join(ROOT, "crawlers")
 KST = timezone(timedelta(hours=9))
-FILE_FMT = "{party}_보도자료.csv"
+# HF file names use the parties' official English names (see party_names.csv in the dataset repo).
+EN_NAMES = {"더불어민주당": "Democratic_Party_of_Korea", "국민의힘": "People_Power_Party",
+            "조국혁신당": "Rebuilding_Korea_Party", "개혁신당": "Reform_Party", "기본소득당": "Basic_Income_Party",
+            "진보당": "Progressive_Party", "사회민주당": "Social_Democratic_Party"}
+FILE_FMT = "{party}_press_releases.csv"
 MAX_NEW_ROWS = 3000
 
 # How to run each party's crawler. "limit" is the starting number of newest list pages.
@@ -322,7 +326,7 @@ def main():
         log(f"\n=== {party} ===")
         try:
             out = os.path.join(args.workdir, "crawl", party)
-            fname = FILE_FMT.format(party=party)
+            fname = FILE_FMT.format(party=EN_NAMES.get(party, party))
             local = hf_hub_download(args.repo, fname, repo_type="dataset", token=token,
                                     local_dir=os.path.join(args.workdir, "hf"))
             if args.days:

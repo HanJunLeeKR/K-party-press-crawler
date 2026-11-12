@@ -15,7 +15,7 @@ When we compared our People Power Party (PPP) file with the conservative-lineage
 | Too little text to test | 2 |
 | Found nowhere in our collection | **19** |
 
-The 19 documents were **appended to the end of `국민의힘_보도자료.csv`** (55,350 → 55,369 rows). The reason why the party website lacks them is not known (for example, deletion by the party is possible but not verified).
+The 19 documents were **appended to the end of `People_Power_Party_press_releases.csv`** (55,350 → 55,369 rows). The reason why the party website lacks them is not known (for example, deletion by the party is possible but not verified).
 
 ### How they are marked in the data
 
