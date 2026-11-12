@@ -1,0 +1,43 @@
+# Manual diagnostic for the Jinbo Party (진보당) website, run on a GitHub runner.
+# It uploads nothing to Hugging Face and needs no secrets. Results: the run's summary and artifact.
+name: Diagnose Jinbo Party access
+
+on:
+  workflow_dispatch:
+    inputs:
+      n:
+        description: "Detail pages to request"
+        default: "150"
+      delay:
+        description: "Seconds between requests"
+        default: "0.7"
+      probe_minutes:
+        description: "Minutes to keep probing after the first failure"
+        default: "10"
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install requests beautifulsoup4
+      - name: Run diagnostic
+        run: python tools/diag_jinbo.py --n "${{ inputs.n }}" --delay "${{ inputs.delay }}" --probe-minutes "${{ inputs.probe_minutes }}"
+      - name: Summary
+        if: always()
+        run: |
+          echo '```json' >> "$GITHUB_STEP_SUMMARY"
+          cat _diag/jinbo_summary.json >> "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: jinbo-diagnostic
+          path: _diag/
