@@ -18,7 +18,7 @@
   python crawl_dp.py --out ./out --board 188 --limit-pages 3 --no-details   # 목록만 시험
   python crawl_dp.py --out ./out --board 188 --sample-ids 1196283,1224463  # 특정 글 상세만
 
-게시판 번호: 보도자료 188, 논평·브리핑 11, 모두발언 230 (사이트 메뉴 기준)
+게시판 번호: 보도자료 188, 논평·브리핑 11, 모두발언 230, 정책브리핑 13 (사이트 메뉴 기준)
 """
 
 import argparse
@@ -560,7 +560,7 @@ def filter_period(items, since, until, log=print):
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
-    ap.add_argument("--board", type=int, required=True, help="brd 번호 (188, 11, 230)")
+    ap.add_argument("--board", type=int, required=True, help="brd 번호 (188=보도자료, 11=논평·브리핑, 230=모두발언, 13=정책브리핑)")
     ap.add_argument("--limit-pages", type=int, default=None, help="목록 페이지 수 제한 (시험용)")
     ap.add_argument("--no-details", action="store_true", help="목록만 수집")
     ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")

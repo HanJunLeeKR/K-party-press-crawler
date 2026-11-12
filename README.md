@@ -1,67 +1,344 @@
-# party-press-crawler
+# K-party-press-crawler
 
-한국 정당(더불어민주당, 국민의힘, 조국혁신당, 개혁신당, 기본소득당, 사회민주당, 진보당)의 보도자료·논평·성명을 수집하는 크롤러 모음입니다. 결과 데이터셋은 Hugging Face에 있으며, 이 저장소에는 코드와 문서만 둡니다.
+Crawlers for the official press releases, commentaries, and briefings of the seven political parties represented in the National Assembly of South Korea (as of 2026):
 
-- 데이터셋: https://huggingface.co/datasets/hanjunlee/KoreanPartyPressRelease (gated)
+| Party | English name |
+|---|---|
+| 더불어민주당 | Democratic Party of Korea |
+| 국민의힘 | People Power Party |
+| 조국혁신당 | Rebuilding Korea Party |
+| 개혁신당 | Reform Party |
+| 기본소득당 | Basic Income Party |
+| 사회민주당 | Social Democratic Party |
+| 진보당 | Progressive Party |
 
-## 크롤러
+This repository contains **code and documentation only**. The collected dataset (about 146,000 documents) is published on Hugging Face and is gated:
 
-정당마다 파일이 하나씩 있고, 모두 `--out 출력폴더`가 필요합니다.
+- Dataset: https://huggingface.co/datasets/hanjunlee/KoreanPartyPressRelease
 
-| 정당 | 파일 | 게시판 |
-|---|---|---|
-| 더불어민주당 | `crawlers/crawl_dp.py` | 보도자료(188), 논평·브리핑(11), 모두발언(230), 정책브리핑(13) |
-| 국민의힘 | `crawlers/crawl_ppp.py` | 대변인 논평·보도자료(BBSDD0001), 원내 보도자료(BBSDD0002), 정책위(BBSDD0003), 미디어위원회(BBSDD0042, 과거 미디어특위) |
-| 조국혁신당 | `crawlers/crawl_cj.py` | 기자회견문, 논평브리핑, 정책 브리핑, 보도자료 |
-| 개혁신당 | `crawlers/crawl_reform.py` | 논평·브리핑(briefing), 보도자료(press) |
-| 기본소득당 | `crawlers/crawl_basicincome.py` | 논평·보도자료 |
-| 사회민주당 | `crawlers/crawl_sdp.py` | 브리핑 (논평성명·브리핑·보도자료, SNS는 기본 제외) |
-| 진보당 | `crawlers/crawl_jinbo.py` | 보도자료, 논평, 모두발언, 정책논평 |
+If you only want to *use* the data, download the dataset. If you want to *re-collect*, update, or extend it (for example, to fetch only last month's releases), this repository is for you.
+
+---
+
+## Table of contents
+
+1. [What you get](#1-what-you-get)
+2. [Quick start (10 minutes)](#2-quick-start-10-minutes)
+3. [Installation in detail](#3-installation-in-detail)
+4. [The crawlers, party by party](#4-the-crawlers-party-by-party)
+5. [Common recipes](#5-common-recipes)
+6. [Understanding the output](#6-understanding-the-output)
+7. [Troubleshooting](#7-troubleshooting)
+8. [Collection criteria](#8-collection-criteria)
+9. [Responsible use](#9-responsible-use)
+10. [Repository layout](#10-repository-layout)
+11. [Citation and contact](#11-citation-and-contact)
+
+---
+
+## 1. What you get
+
+Each crawler visits one party's website, walks through the list pages of the selected boards (for example, "press releases" and "commentaries"), opens every post, and saves:
+
+- a **CSV file** with one row per post (title, date, author, body text, URL, and so on),
+- the **raw HTML** of every page you downloaded (compressed, in a `raw/` folder), so that you can re-parse later without contacting the website again,
+- a **checkpoint file** (`details.jsonl`), so that if the run is interrupted you can run the same command again and it resumes where it stopped.
+
+The crawlers are independent scripts. There is one file per party, and each relies mainly on `requests` and `beautifulsoup4`.
+
+## 2. Quick start (10 minutes)
+
+This walks you through a small, safe first run: the Social Democratic Party briefings from the last few months.
+
+**Step 1. Install Python 3.10 or newer.** Check with:
 
 ```bash
-python crawlers/crawl_sdp.py --out ./out
-python crawlers/crawl_dp.py --out ./out --board 188        # 게시판 번호를 지정
-python crawlers/crawl_ppp.py --out ./out --board all
-python crawlers/crawl_jinbo.py --out ./out --since 2025-01-01 --until 2025-12-31   # 기간 지정
-python crawlers/crawl_cj.py --out ./out --since 2025-01-01 --until 2025-12-31
+python --version        # on some systems: python3 --version
 ```
 
-### 기간 지정과 빈 곳 채우기
+**Step 2. Download the code.**
 
-- **기간 지정:** 모든 수집기가 `--since YYYY-MM-DD`와 `--until YYYY-MM-DD`(양끝 포함)를 지원합니다. 목록에서 날짜로 거른 뒤 해당 글만 상세 수집하므로 시간이 크게 줄고, `list.json`에는 전체 목록이 그대로 남습니다. 목록에 날짜가 없는 글은 기간을 확인할 수 없어 제외됩니다. (조국혁신당은 기존 `--start`/`--end`도 계속 쓸 수 있습니다.) 더불어민주당 옛 글 중에는 날짜가 `2003-11-11`로 일괄 표시된 것이 많으니, 옛 기간을 지정할 때 유의하세요.
-- **서버가 연결을 끊을 때 (국민의힘):** `crawl_ppp.py`는 `--workers 1 --delay 1.5`로 천천히 받을 수 있습니다(기본은 동시 3건, 0.2~0.8초 대기). 중단된 수집을 이어 받을 때는 `--reuse-list`를 함께 주면 이미 받은 목록 292쪽을 다시 훑지 않습니다. 받은 글은 `details.jsonl`에 저장되어 같은 명령을 다시 실행하면 이어서 받습니다.
-- **빈 곳 채우기·증분 수집:** 국민의힘, 기본소득당, 사회민주당, 진보당, 더불어민주당은 `--exclude-csv 기존.csv`를 지원합니다. 기존 CSV에 본문이 있는 글은 건너뛰고, 새 글과 본문이 비어 있던 글만 받습니다. 기존 CSV에는 `url`과 `text` 컬럼(더불어민주당은 `board_name`도)이 있어야 합니다. 결과에는 새로 받은 행만 들어 있습니다.
-- 더불어민주당은 기존 CSV에서 본문이 비어 있던 글만 다시 받는 `--refetch-empty 기존.csv`도 있습니다.
-- 첨부파일이나 이미지에 글자가 없는 글은 다시 받아도 비어 있습니다. 이유는 `fail_reason`에 기록됩니다.
+```bash
+git clone https://github.com/HanJunLeeKR/k-party-press-crawler.git
+cd k-party-press-crawler
+```
 
-## 설치
+(No Git? On the GitHub page, click **Code → Download ZIP**, unzip it, and open a terminal in that folder.)
+
+**Step 3. Create an isolated environment and install the requirements.**
+
+```bash
+python -m venv .venv
+source .venv/bin/activate          # Windows (PowerShell): .venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+**Step 4. Run a first collection.** The `--since` option limits the run to recent posts, so it finishes in a minute or two:
+
+```bash
+python crawlers/crawl_sdp.py --out ./out --since 2026-09-01
+```
+
+**Step 5. Look at the result.**
+
+```text
+out/sdp/사회민주당_브리핑.csv      <- the data
+out/sdp/raw/                       <- raw HTML (compressed)
+out/sdp/summary.json               <- counts and a status summary
+```
+
+Open the CSV in Python:
+
+```python
+import pandas as pd
+df = pd.read_csv("out/sdp/사회민주당_브리핑.csv")
+print(df[["date", "title", "status"]].head())
+```
+
+or in Excel (the files are UTF-8 with a byte-order mark, so Korean text displays correctly).
+
+That is the whole workflow. Every other crawler works the same way; only the script name and a few options change (see [Section 4](#4-the-crawlers-party-by-party)).
+
+## 3. Installation in detail
+
+### 3.1 Python packages
 
 ```bash
 pip install -r requirements.txt
 ```
 
-본문이 첨부파일이나 이미지에만 있는 글을 읽으려면 아래 프로그램이 필요합니다. 없으면 해당 글은 본문 없음으로 기록됩니다.
+This installs `requests`, `beautifulsoup4`, `pandas`, and `pyhwp`.
 
-| 용도 | 프로그램 |
+### 3.2 Optional programs (only needed for some posts)
+
+A few posts contain their text **only in an attached file or in an image**. To read those, the crawlers call external programs. If a program is missing, the crawler does not fail; it records the post with empty text and explains why in the `fail_reason` column.
+
+| Used for | Program | Windows | macOS | Ubuntu / Debian |
+|---|---|---|---|---|
+| PDF attachments | Poppler (`pdftotext`) | Download Poppler for Windows and add its `bin` folder to `PATH` | `brew install poppler` | `sudo apt install poppler-utils` |
+| HWP attachments (Hancom) | `pyhwp` (`hwp5txt`) | included in `requirements.txt` | included | included |
+| Text inside images (OCR) | Tesseract with Korean data | UB-Mannheim installer, select the Korean language data | `brew install tesseract tesseract-lang` | `sudo apt install tesseract-ocr tesseract-ocr-kor` |
+
+Check that they work:
+
+```bash
+pdftotext -v
+tesseract --list-langs     # the list should include "kor"
+```
+
+### 3.3 Network
+
+You need ordinary internet access to each party's website. No login and no API key is required.
+
+## 4. The crawlers, party by party
+
+All crawlers share these options:
+
+| Option | Meaning |
 |---|---|
-| PDF 첨부 | poppler (`pdftotext`) |
-| HWP 첨부 | pyhwp (`hwp5txt`, `requirements.txt`에 포함) |
-| 이미지 본문 OCR | tesseract 와 한국어 데이터 (`kor`) |
+| `--out DIR` | **Required.** Output folder. It is created if needed. |
+| `--since YYYY-MM-DD` | Only posts on or after this date (inclusive). |
+| `--until YYYY-MM-DD` | Only posts on or before this date (inclusive). |
+| `--no-details` | Collect only the list of posts (titles, dates, URLs); do not open each post. Useful for a quick test. |
 
-## 출력 형식
+Several crawlers also accept `--exclude-csv existing.csv` (skip posts that you already have; see [Section 5.3](#53-update-an-existing-collection-incremental-collection)).
 
-새 수집기의 CSV는 공통 컬럼을 씁니다: `post_id, board_name, title, category, date(YYYY-MM-DD), pub_date, date_mismatch, writer, text, text_source, status, fail_reason, url, fetched_at`. `status`와 `fail_reason`으로 본문 수집 성공 여부와 실패 사유(한글)를 확인할 수 있습니다. 상세 HTML 원본은 `raw/`에 gzip으로 보존됩니다.
+| Party | Script | Boards collected | Output location |
+|---|---|---|---|
+| Democratic Party of Korea | `crawlers/crawl_dp.py` | press releases (`188`), commentaries and briefings (`11`), opening remarks (`230`), policy briefings (`13`) | `out/brd{N}_{name}/{name}.csv` |
+| People Power Party | `crawlers/crawl_ppp.py` | spokesperson commentaries and press releases (`BBSDD0001`), floor-leadership press releases (`BBSDD0002`), Policy Committee (`BBSDD0003`), media committee (`BBSDD0042`, formerly "Special Committee on Media") | `out/ppp_{code}/{name}.csv` |
+| Rebuilding Korea Party | `crawlers/crawl_cj.py` | press-conference statements, commentaries and briefings, policy briefings, press releases | `out/조국혁신당_보도자료_{start}_{end}.csv` |
+| Reform Party | `crawlers/crawl_reform.py` | commentaries and briefings (`briefing`), press releases (`press`) | `out/reform_{key}/{name}.csv` |
+| Basic Income Party | `crawlers/crawl_basicincome.py` | commentaries and press releases (one board) | `out/basicincome/기본소득당보도자료.csv` |
+| Social Democratic Party | `crawlers/crawl_sdp.py` | briefings | `out/sdp/사회민주당_브리핑.csv` |
+| Progressive Party | `crawlers/crawl_jinbo.py` | press releases, commentaries, opening remarks, policy commentaries | `out/jinbo/진보당보도자료.csv` |
 
-## 병합 도구
+Examples (run one at a time; each prints its progress):
 
-`tools/merge_parties.py`는 기존 CSV와 새 수집분을 정당별 파일로 합치는 관리용 스크립트입니다. 입력 파일 위치가 작업 폴더 구조에 맞춰져 있어 그대로 쓰기보다는 참고용입니다. 규칙: `date` 정규화(시각은 `datetime`), 본문이 있는 쪽 우선, 본문 가공 없음.
+```bash
+# Democratic Party: --board is required and takes the site's board number
+python crawlers/crawl_dp.py --out ./out --board 188      # press releases
+python crawlers/crawl_dp.py --out ./out --board 11       # commentaries and briefings
+python crawlers/crawl_dp.py --out ./out --board 230      # opening remarks
+python crawlers/crawl_dp.py --out ./out --board 13       # policy briefings
 
-## 참고 문서
+# People Power Party: one board, or all of them
+python crawlers/crawl_ppp.py --out ./out --board BBSDD0001
+python crawlers/crawl_ppp.py --out ./out --board all
 
-- [notebooks/reinforce_dp.ipynb](notebooks/reinforce_dp.ipynb): 더불어민주당 CSV 본문 보완·정제 노트북 (이전 작업)
-- [docs/diagnosis.md](docs/diagnosis.md): 2026-11 업데이트 시점의 누락 진단 (과거 기록)
+# Rebuilding Korea Party: choose boards by name (quote names that contain a space)
+python crawlers/crawl_cj.py --out ./out --boards 논평브리핑 "정책 브리핑" --since 2026-01-01
 
-## 데이터 취급
+# Reform Party
+python crawlers/crawl_reform.py --out ./out --board all
 
-- 원자료(raw)는 항상 보존하고, 정제·병합은 새 폴더에서 진행합니다.
-- 공개 저장소로 전환하기 전에 수집 대상 사이트의 이용 약관과 데이터셋 접근 조건을 확인하세요.
+# Basic Income, Social Democratic, Progressive Parties
+python crawlers/crawl_basicincome.py --out ./out
+python crawlers/crawl_sdp.py --out ./out
+python crawlers/crawl_jinbo.py --out ./out --boards 정책논평 논평
+```
+
+Party-specific notes:
+
+- **Democratic Party.** Many old posts show the same placeholder date `2003-11-11` on the website. Do not rely on `--since` for very old periods. Some posts consist only of attached PDFs that the website refuses to serve (`status = site_denied`).
+- **People Power Party.** The server sometimes resets connections when it receives many requests at once. Use `--workers 1 --delay 1.5` (see [Section 7](#7-troubleshooting)). The old "Special Committee on Media" board is the same board as the current media committee (`BBSDD0042`).
+- **Rebuilding Korea Party.** Data are read from the site's public board API. `--since` and `--until` are also available under the older names `--start` and `--end`.
+- **Social Democratic Party.** Items labelled as social-media posts are skipped unless you add `--include-sns`.
+- **Progressive Party.** The website does not declare a character encoding; the crawler decodes pages as UTF-8 explicitly. The commentary board includes some posts titled as party-schedule announcements.
+
+## 5. Common recipes
+
+### 5.1 Collect a specific period
+
+```bash
+python crawlers/crawl_jinbo.py --out ./out --since 2025-01-01 --until 2025-12-31
+```
+
+The crawler reads the full list of posts, keeps only those in the period, and opens only those. Posts without a date in the list are excluded because their period cannot be verified. The full list is still saved in `list.json`.
+
+### 5.2 Resume an interrupted run
+
+Just run the same command again. Each downloaded post is saved to `details.jsonl` as it arrives, and the crawler skips posts it already has.
+
+### 5.3 Update an existing collection (incremental collection)
+
+If you already have a CSV and want only the posts that are new (or that were empty last time):
+
+```bash
+python crawlers/crawl_ppp.py --out ./new --board all --exclude-csv ppp_old.csv
+```
+
+- Posts that already have body text in the old CSV are skipped.
+- New posts and posts whose text was empty are downloaded.
+- The result contains **only the newly downloaded rows**; combine it with your old data yourself (see `tools/merge_parties.py` for an example).
+- The old CSV must have `url` and `text` columns (for the Democratic Party also `board_name`).
+
+Supported by: `crawl_ppp.py`, `crawl_basicincome.py`, `crawl_sdp.py`, `crawl_jinbo.py`, `crawl_dp.py`.
+
+For the Democratic Party there is also `--refetch-empty old.csv`, which re-downloads only the posts whose text was empty in the old file.
+
+### 5.4 Be gentle with a server that resets connections
+
+```bash
+python crawlers/crawl_ppp.py --out ./out --board BBSDD0003 --workers 1 --delay 1.5
+```
+
+- `--workers N`: number of simultaneous requests (default 3).
+- `--delay SECONDS`: wait between requests (default 0.2–0.8 s; with `--delay 1.5` the wait is 1.5–2.25 s).
+- `--reuse-list`: when resuming, reuse the saved `list.json` instead of walking all list pages again.
+
+### 5.5 Quick test without downloading everything
+
+```bash
+python crawlers/crawl_sdp.py --out ./test --no-details
+python crawlers/crawl_dp.py --out ./test --board 188 --limit-pages 3 --no-details
+```
+
+## 6. Understanding the output
+
+### 6.1 Folder contents
+
+For each board you get a folder like this:
+
+```text
+out/ppp_BBSDD0003/
+├── 정책위_보도자료.csv      the result
+├── list.json                every post found in the list pages
+├── details.jsonl            checkpoint: one JSON record per downloaded post
+├── summary.json             counts by status, time of collection
+└── raw/
+    ├── list/                raw list pages (gzip)
+    └── detail/              raw post pages (gzip)
+```
+
+The raw files are never modified by later steps. If you change how a page is parsed, you can re-run on the saved HTML.
+
+### 6.2 CSV columns
+
+| Column | Meaning |
+|---|---|
+| `post_id` | Identifier of the post on the party's website. |
+| `board_name` | Board the post came from. |
+| `title` | Title as displayed. |
+| `category` (or `section`) | Sub-category, when the site provides one. |
+| `date` | Publication date, `YYYY-MM-DD`. |
+| `pub_date` | Publication date as printed inside the post page. |
+| `date_mismatch` | `True` if `date` (list page) and `pub_date` (post page) disagree. |
+| `writer` | Author or publishing unit, when available. |
+| `text` | Body text, as published (markup removed, otherwise untouched). |
+| `text_source` | `body` (from the page), `attachment` (from an attached PDF/HWP), `ocr` (from images), or `none`. |
+| `status` | Result of the download, see below. |
+| `fail_reason` | Human-readable reason (in Korean) when text could not be obtained. |
+| `url` | Address of the original post. |
+| `fetched_at` | When the post was downloaded. |
+
+(Column sets differ slightly between parties, because the websites expose different information. The Rebuilding Korea Party crawler writes a shorter set: `id, board_name, title, category, date, writer, text, url`.)
+
+### 6.3 Status values
+
+| `status` | Meaning |
+|---|---|
+| `ok` | Body text was read from the page. |
+| `attachment_ok` | Body text was extracted from an attached PDF or HWP file. |
+| `image_ocr` | The body consisted of images; text was recognized by OCR. |
+| `image_only_ocr_empty` | The body consists of images, and OCR found no usable text. |
+| `image_download_failed` | The body images could not be downloaded (for example, their server no longer exists). |
+| `site_denied` | The website refused to serve the attachment. |
+| `no_body` | The post is empty on the website. |
+| `fetch_failed` | The page could not be downloaded even after retries. Run again to retry. |
+
+Posts with no usable text are **kept** in the CSV (with an explanation) rather than silently dropped.
+
+### 6.4 Excel limits
+
+Excel cannot hold more than 32,767 characters in a cell, so very long posts may be cut or corrupt a row if you open and re-save the CSV in Excel. Use Python (`pandas`) or R for analysis, or open the file read-only.
+
+## 7. Troubleshooting
+
+| Symptom | Likely cause and fix |
+|---|---|
+| `ConnectionResetError` or many retries | The server is limiting request rates. Use `--workers 1 --delay 1.5` (People Power Party crawler) and run again; progress is saved. |
+| The script stops at the very first request | Same cause. The crawler retries the first connection up to six times; if it still fails, wait a few minutes and run again. |
+| Korean text looks like `ì¢…...` | The page was decoded with the wrong encoding. The crawlers set UTF-8 where needed; if you parse raw HTML yourself, decode it as UTF-8. |
+| `pdftotext: command not found` / `tesseract: command not found` | Optional program not installed ([Section 3.2](#32-optional-programs-only-needed-for-some-posts)). Collection continues; affected posts have empty text. |
+| A post has empty `text` | Look at `status` and `fail_reason`. Many are genuinely empty or image-only posts, or attachments that the site does not serve. Running again does not change this. |
+| Run takes hours | Normal for full histories (tens of thousands of posts). Use `--since` to limit the period. |
+| Dates such as `2003-11-11` | Placeholder date shown by the Democratic Party website for old posts. |
+| Windows: `Activate.ps1` is blocked | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` in PowerShell once, or use Command Prompt and `.venv\Scripts\activate.bat`. |
+
+## 8. Collection criteria
+
+To keep the parties comparable, the same rule is applied to every site:
+
+1. Collect the **News** (소식) section of each party's official website.
+2. **Always include** commentaries and briefings (논평·브리핑). Include press releases, opening remarks, and policy-related briefing or commentary boards where the party has them.
+3. **Exclude** notice boards (공지사항), schedule pages, galleries, newsletters, and reference archives.
+4. For each included board, walk **all** list pages and keep every post.
+
+If a party changes its website, a crawler may stop working. Please open an issue with the command you ran and the error message.
+
+## 9. Responsible use
+
+- **Be polite to the servers.** The defaults wait between requests; do not remove these waits or run many copies in parallel.
+- **Check the terms of each website** and the copyright rules that apply to your use. The texts are public communications of political organizations, but the websites' terms apply to how you collect and redistribute them.
+- Posts name public figures in their official roles. Do not use the data to target private individuals.
+- Raw data should be preserved. Do cleaning, de-duplication, and merging in a **new folder**, never by overwriting the raw files.
+
+## 10. Repository layout
+
+```text
+crawlers/            one crawler per party (crawl_dp.py, crawl_ppp.py, ...)
+tools/merge_parties.py   maintainer script that merged earlier and later collections
+                         (paths are specific to the maintainer's working folders; read it as an example)
+notebooks/reinforce_dp.ipynb   earlier notebook for repairing Democratic Party CSV text
+docs/diagnosis.md    record of the problems found when the dataset was first updated
+requirements.txt     Python packages
+```
+
+## 11. Citation and contact
+
+If you use the dataset or this code in research, please cite:
+
+> Lee, H. J. (2026). *Korean Parliamentary Party Press Release Dataset* [Data set]. Hugging Face. https://huggingface.co/datasets/hanjunlee/KoreanPartyPressRelease
+
+Contact: hanjunleekr@hufs.ac.kr (Hankuk University of Foreign Studies). Bug reports and suggestions are welcome as GitHub issues.
