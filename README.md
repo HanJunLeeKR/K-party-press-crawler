@@ -1,6 +1,6 @@
 # K-party-press-crawler
 
-Crawlers for the official press releases, commentaries, and briefings of the seven political parties represented in the National Assembly of South Korea (as of 2026):
+The National Assembly Library(https://law.nanet.go.kr/policy/assemblyBodo/list.do) of Korea provides party-specific statement data, but it does not provide the predecessor statements of mainstream parties. Recently, Lim (2025, https://www.nature.com/articles/s41597-025-05220-4) has made a significant contribution to this field by providing press releases and datasets from mainstream Korean political parties, but statements and press releases from non-mainstream parties are limited, and data reflecting changes in the political context following President Yoon Suk Yeol's martial law are not provided. Therefore, we developed this data collector to also gather past statements and press releases from mainstream parties. This code includes automation to collect official statements and press release data weekly using Github Actions. The collected dataset is on Huggingface. Crawlers for the official press releases, commentaries, and briefings of the seven political parties represented in the National Assembly of South Korea (as of 2026):
 
 | Party | English name |
 |---|---|
