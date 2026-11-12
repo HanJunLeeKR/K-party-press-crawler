@@ -412,4 +412,4 @@ If you use the dataset or this code in research, please cite:
 Contact: hanjunleekr@hufs.ac.kr (Hankuk University of Foreign Studies). Bug reports and suggestions are welcome as GitHub issues.
 
 ## Acknowledgements
-This notebook was developed with the assistance of Claude Opus 5.5 (Anthropic).
+This repository was developed with the assistance of Claude Opus 5.5 (Anthropic).
