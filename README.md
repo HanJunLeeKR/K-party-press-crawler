@@ -10,7 +10,7 @@ The National Assembly Library(https://law.nanet.go.kr/policy/assemblyBodo/list.d
 | 개혁신당 | Reform Party |
 | 기본소득당 | Basic Income Party |
 | 사회민주당 | Social Democratic Party, Samindang |
-| 진보당 | Progressive Party, Jinbodang |
+| 진보당 | Progressive Party, Jinboparty |
 
 This repository contains **code and documentation only**. The collected dataset (about 146,000 documents) is published on Hugging Face and is gated:
 
