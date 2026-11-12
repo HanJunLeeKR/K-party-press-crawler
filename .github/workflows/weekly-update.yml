@@ -7,6 +7,10 @@ name: Weekly update to Hugging Face
 #   Settings -> Secrets and variables -> Actions -> New repository secret
 # and add a secret named HF_TOKEN. Use a Hugging Face "fine-grained" token that has
 # WRITE access to the dataset hanjunlee/KoreanPartyPressRelease only.
+#
+# Optional alert e-mail when a party website seems to have changed (see README section 9):
+# add the secrets MAIL_USERNAME (a Gmail address), MAIL_PASSWORD (a Google "app password"),
+# and optionally MAIL_TO (where to send; default = MAIL_USERNAME).
 
 on:
   schedule:
@@ -82,6 +86,14 @@ jobs:
             cat _update/update_summary.json >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           fi
+
+      - name: E-mail an alert if something went wrong
+        if: failure()
+        env:
+          MAIL_USERNAME: ${{ secrets.MAIL_USERNAME }}
+          MAIL_PASSWORD: ${{ secrets.MAIL_PASSWORD }}
+          MAIL_TO: ${{ secrets.MAIL_TO }}
+        run: python tools/send_alert_mail.py --summary _update/update_summary.json
 
       - name: Keep the summary file
         if: always()

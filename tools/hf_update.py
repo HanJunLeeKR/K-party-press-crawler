@@ -16,6 +16,9 @@ Safety rules built in
   * A party with an implausible number of new rows (default > 3000) is skipped, not uploaded.
   * --dry-run does everything except the upload.
   * One failing party does not stop the others; the script exits with an error at the end.
+  * Change detection: an empty list, no posts at all, many posts without title/date, or many
+    posts without body text is reported as a problem (exit code 1 -> e-mail alert in GitHub
+    Actions). Rows that look broken are not uploaded.
   * Hugging Face keeps the full history of the dataset, so any update can be reverted.
 
 Usage
@@ -81,6 +84,7 @@ PARTIES = {
         "cols": {},
     },
     "사회민주당": {
+        "quiet_ok": True,   # publishes rarely: zero posts in 21 days is normal
         "limit": 5,
         "cmds": [["crawl_sdp.py"]],
         "cols": {},
@@ -149,7 +153,8 @@ def load_new_rows(party, spec, workdir, since):
     paths = [p for p in glob.glob(os.path.join(workdir, "**", "*.csv"), recursive=True)
              if os.sep + "raw" + os.sep not in p]
     if not paths:
-        return pd.DataFrame(columns=M.COLS)
+        empty = pd.DataFrame(columns=M.COLS)
+        return empty, empty
     frames = [M.rd(p) for p in sorted(paths)]
     df = pd.concat(frames, ignore_index=True)
     df = M.frame(df, party, f"auto_update_{datetime.now(KST).strftime('%Y-%m-%d')}", **spec["cols"])
@@ -157,7 +162,44 @@ def load_new_rows(party, spec, workdir, since):
         times = M.bi_times(os.path.join(workdir, "basicincome", "raw", "detail"))
         df["datetime"] = [times.get(str(p), d) for p, d in zip(df["post_id"], df["datetime"])]
     df = M.finalize(df, party)
-    return df[df["date"] >= since].copy()
+    return df, df[df["date"] >= since].copy()
+
+
+def health_check(party, spec, workdir, all_rows, in_period, days):
+    """Detect a changed website. Returns (problems, block).
+
+    problems: list of human-readable messages. block=True means the collected rows look broken
+    and must NOT be appended to the dataset.
+    """
+    problems, block = [], False
+    # a list page that parsed to nothing is the typical sign of a redesigned site
+    for p in glob.glob(os.path.join(workdir, "**", "list.json"), recursive=True):
+        try:
+            n = len(json.load(open(p, encoding="utf-8")))
+        except (OSError, ValueError):
+            n = 0
+        if n == 0:
+            problems.append(f"{party}: the list of posts is empty ({os.path.relpath(p, workdir)}). "
+                            "The website structure may have changed.")
+            block = True
+    n = len(in_period)
+    if n == 0 and not spec.get("quiet_ok") and not block:
+        problems.append(f"{party}: no posts at all in the last {days} days. "
+                        "The website may have changed (or the site is blocking this server).")
+    total = len(all_rows)
+    if total >= 10:
+        no_title = float((all_rows["title"].str.strip() == "").mean())
+        no_date = float((all_rows["date"].str.strip() == "").mean())
+        if no_title > 0.1 or no_date > 0.1:
+            problems.append(f"{party}: {no_title:.0%} of the collected posts have no title and {no_date:.0%} "
+                            "have no date. The page layout may have changed; nothing was uploaded for this party.")
+            block = True
+    if n >= 10:
+        no_text = float((in_period["text"].str.strip() == "").mean())
+        if no_text > 0.4:
+            problems.append(f"{party}: {no_text:.0%} of the recent posts have no body text. "
+                            "The post-page layout may have changed.")
+    return problems, block
 
 
 def file_sha(path, nbytes):
@@ -217,15 +259,30 @@ def main():
     log(f"Collecting posts since {since} ({args.days} days) for: {', '.join(args.parties)}")
     os.makedirs(args.workdir, exist_ok=True)
 
-    ops, summary, errors = [], {}, []
+    ops, summary, errors, problems = [], {}, [], []
     for party in args.parties:
         spec = PARTIES[party]
         log(f"\n=== {party} ===")
         try:
             out = os.path.join(args.workdir, "crawl", party)
             run_crawlers(party, spec, since, out)
-            new = load_new_rows(party, spec, out, since)
+            all_rows, new = load_new_rows(party, spec, out, since)
             log(f"  collected {len(new)} posts in the period")
+            found, block = health_check(party, spec, out, all_rows, new, args.days)
+            for msg in found:
+                log(f"  WARNING: {msg}")
+            problems += found
+            if block:
+                summary[party] = 0
+                continue
+            # rows whose page could not be downloaded are not appended now; they are retried next week
+            if "status" in new.columns:
+                failed_rows = new["status"] == "fetch_failed"
+                if failed_rows.any():
+                    msg = f"{party}: {int(failed_rows.sum())} posts could not be downloaded and were skipped (retried next run)."
+                    log(f"  WARNING: {msg}")
+                    problems.append(msg)
+                    new = new[~failed_rows]
 
             fname = FILE_FMT.format(party=party)
             local = hf_hub_download(args.repo, fname, repo_type="dataset", token=token,
@@ -249,12 +306,15 @@ def main():
         except Exception as e:  # keep going with the other parties
             log(f"  ERROR for {party}: {e}")
             errors.append(party)
+            problems.append(f"{party}: the update failed with an error: {e}")
 
     log("\n=== summary ===")
     for p, n in summary.items():
         log(f"  {p}: +{n}")
     if errors:
         log(f"  failed: {', '.join(errors)}")
+    for msg in problems:
+        log(f"  problem: {msg}")
 
     if ops and not args.dry_run:
         msg = "Weekly update: " + ", ".join(f"{p} +{n}" for p, n in summary.items() if n)
@@ -265,9 +325,10 @@ def main():
     else:
         log("no new posts to upload")
     with open(os.path.join(args.workdir, "update_summary.json"), "w", encoding="utf-8") as f:
-        json.dump({"since": since, "new_rows": summary, "failed": errors,
+        json.dump({"since": since, "new_rows": summary, "failed": errors, "problems": problems,
                    "run_at": datetime.now(KST).isoformat(timespec="seconds")}, f, ensure_ascii=False, indent=2)
-    sys.exit(1 if errors else 0)
+    # a non-zero exit marks the GitHub run as failed, which triggers the e-mail alert
+    sys.exit(1 if (errors or problems) else 0)
 
 
 if __name__ == "__main__":

@@ -335,9 +335,10 @@ The code lives in `tools/hf_update.py` (it reuses the crawlers in `crawlers/`).
 
 1. **Create a Hugging Face token.** Go to https://huggingface.co/settings/tokens → *Create new token* → type *Fine-grained* → give it **write** access to the dataset `hanjunlee/KoreanPartyPressRelease` only. Copy the token (it starts with `hf_`).
 2. **Store it as a GitHub secret.** In this repository: *Settings → Secrets and variables → Actions → New repository secret*. Name: `HF_TOKEN`. Value: the token. Never write a token into a file or a commit.
-3. **Enable Actions** (*Actions* tab → enable workflows, if asked).
-4. **Run a test first.** *Actions → Weekly update to Hugging Face → Run workflow*. Leave *dry run* checked. It collects and checks everything but uploads nothing. Open the run and read the summary at the bottom: the number of new posts per party should be small and plausible.
-5. **Run it for real once**, with *dry run* unchecked, and look at the new commit on the dataset page. After that the weekly schedule takes over.
+3. **(Optional but recommended) Set up the alert e-mail.** See Section 9.4. Without it GitHub still sends its own "workflow failed" e-mail, but not the detailed message.
+4. **Enable Actions** (*Actions* tab → enable workflows, if asked).
+5. **Run a test first.** *Actions → Weekly update to Hugging Face → Run workflow*. Leave *dry run* checked. It collects and checks everything but uploads nothing. Open the run and read the summary at the bottom: the number of new posts per party should be small and plausible.
+6. **Run it for real once**, with *dry run* unchecked, and look at the new commit on the dataset page. After that the weekly schedule takes over.
 
 ### 9.2 Running it by hand (locally)
 
@@ -351,12 +352,32 @@ Useful options: `--days N` (period), `--parties ...` (subset), `--dry-run` (no u
 
 ### 9.3 Things to know
 
-- **A failing party does not stop the others.** The run is marked as failed and GitHub emails the repository owner; fix the crawler and run the workflow again (already-uploaded parties are skipped because their posts are no longer new).
+- **A failing party does not stop the others.** The run is marked as failed and an alert e-mail is sent (Section 9.4); fix the crawler and run the workflow again (already-uploaded parties are skipped because their posts are no longer new).
 - **Website changes** are the usual cause of failures. If a party redesigns its site, its crawler needs an update.
 - **Scheduled workflows are paused** by GitHub after 60 days without any repository activity. Re-enable them in the *Actions* tab if that happens.
 - **Network location.** GitHub's runners are outside Korea. If a party website blocks or throttles them, that party fails with connection errors; run the updater from your own computer instead (Section 9.2).
 - **Posts that are later edited** or whose attachments become available later are not refreshed, because the updater only appends posts it has not seen. Use the crawlers' `--exclude-csv` option (Section 5.3) for a manual repair.
 - The dataset card (README on Hugging Face) describes the first release of 2026-11-11; later rows are marked in the `source` column as `auto_update_YYYY-MM-DD`.
+
+### 9.4 Alert e-mail when a website changes
+
+The updater does not only look for crashes; it also detects *silent* breakage (a redesigned page that still loads but yields nothing useful). A party is flagged when:
+
+- its list of posts is empty (blocking: nothing is uploaded for that party),
+- no post at all was found in the period (not applied to 사회민주당, which publishes rarely),
+- more than 10% of the new posts have no title or no date (blocking),
+- more than 40% of the new posts have an empty body (warning only),
+- rows with `status = fetch_failed` are never uploaded; they are retried at the next run.
+
+If any party is flagged or fails, the job ends as *failed* and the step `E-mail an alert if something went wrong` sends a plain-text mail (problem list, new rows per party, link to the run log) through Gmail. Healthy parties are still updated.
+
+Setup (once):
+
+1. Turn on 2-step verification for the sending Google account, then create an **app password** at https://myaccount.google.com/apppasswords.
+2. Add repository secrets (*Settings → Secrets and variables → Actions*): `MAIL_USERNAME` (the Gmail address that sends), `MAIL_PASSWORD` (the app password), and optionally `MAIL_TO` (the receiving address; default is `MAIL_USERNAME`). Never write them into a file, an issue, or a chat.
+3. Test the mail text locally without sending: `python tools/send_alert_mail.py --print`.
+
+If the secrets are missing the step is skipped with a message; the original failure is not hidden.
 
 ## 10. Responsible use
 
@@ -370,6 +391,7 @@ Useful options: `--days N` (period), `--parties ...` (subset), `--dry-run` (no u
 ```text
 crawlers/            one crawler per party (crawl_dp.py, crawl_ppp.py, ...)
 tools/hf_update.py       weekly updater used by the GitHub Action (appends new posts to the dataset)
+tools/send_alert_mail.py alert e-mail sent by the workflow when a problem is detected
 .github/workflows/      GitHub Actions workflow (weekly-update.yml)
 tools/merge_parties.py   maintainer script that merged earlier and later collections
                          (paths are specific to the maintainer's working folders; read it as an example)
