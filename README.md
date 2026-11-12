@@ -4,13 +4,13 @@ The National Assembly Library(https://law.nanet.go.kr/policy/assemblyBodo/list.d
 
 | Party | English name |
 |---|---|
-| 더불어민주당 | Democratic Party of Korea |
-| 국민의힘 | People Power Party |
+| 더불어민주당 | Democratic Party of Korea, TheMinjoo |
+| 국민의힘 | Conservative Party of Korea, People Power Party |
 | 조국혁신당 | Rebuilding Korea Party |
 | 개혁신당 | Reform Party |
 | 기본소득당 | Basic Income Party |
-| 사회민주당 | Social Democratic Party |
-| 진보당 | Progressive Party |
+| 사회민주당 | Social Democratic Party, Samindang |
+| 진보당 | Progressive Party, Jinbodang |
 
 This repository contains **code and documentation only**. The collected dataset (about 146,000 documents) is published on Hugging Face and is gated:
 
