@@ -123,12 +123,14 @@ def fetch_list_page(session, board, page, raw_dir):
     return parse_list(r.text, board)
 
 
-def walk_list(session, raw_dir, log=print, boards=None):
+def walk_list(session, raw_dir, log=print, boards=None, limit_pages=None):
     """게시판별로 새 ID가 없는 쪽(범위 초과로 마지막 쪽이 반복됨)이 나올 때까지 순차 수집."""
     got, failed_pages = {}, []
     for board in (boards or BOARDS):
         seen, page, bad = set(), 1, 0
         while True:
+            if limit_pages and page > limit_pages:
+                break
             try:
                 rows = fetch_list_page(session, board, page, raw_dir)
             except (FetchError, OSError):
@@ -336,6 +338,8 @@ def main(argv=None):
     ap.add_argument("--no-details", action="store_true")
     ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--until", type=ymd, default=None, help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
+    ap.add_argument("--limit-pages", type=int, default=None,
+                    help="최신 글부터 이 쪽 수까지만 목록 수집 (최근 글만 받을 때 사용, 목록은 최신순)")
     ap.add_argument("--exclude-csv", default="")
     ap.add_argument("--boards", nargs="*", default=None, choices=list(BOARDS), help="수집할 게시판 (기본: 전체)")
     args = ap.parse_args(argv)
@@ -346,7 +350,7 @@ def main(argv=None):
     os.makedirs(out_dir, exist_ok=True)
     session = make_session()
     log("[진보당] 목록 수집")
-    items, failed_pages = walk_list(session, raw_dir, log=log, boards=args.boards)
+    items, failed_pages = walk_list(session, raw_dir, log=log, boards=args.boards, limit_pages=args.limit_pages)
     labels = {}
     for it in items:
         labels[it["board_name"]] = labels.get(it["board_name"], 0) + 1

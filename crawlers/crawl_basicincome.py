@@ -157,7 +157,7 @@ def fetch_list_page(session, page, raw_dir):
     return parse_list(r.text)
 
 
-def walk_list(session, raw_dir, log=print):
+def walk_list(session, raw_dir, log=print, limit_pages=None):
     last = last_page(session, raw_dir)
     log(f"  마지막 쪽 {last}")
     got, failed_pages = {}, []
@@ -169,7 +169,7 @@ def walk_list(session, raw_dir, log=print):
         except (FetchError, requests.RequestException, OSError):
             return p, None
 
-    pages = list(range(1, last + 1))
+    pages = list(range(1, (min(last, limit_pages) if limit_pages else last) + 1))
     for rnd in range(3):
         todo = pages if rnd == 0 else failed_pages
         failed_pages = []
@@ -388,6 +388,8 @@ def main(argv=None):
     ap.add_argument("--no-details", action="store_true")
     ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--until", type=ymd, default=None, help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
+    ap.add_argument("--limit-pages", type=int, default=None,
+                    help="최신 글부터 이 쪽 수까지만 목록 수집 (최근 글만 받을 때 사용, 목록은 최신순)")
     ap.add_argument("--exclude-csv", default="", help="기존 CSV: 본문 있는 항목은 건너뛰고 나머지는 다시 받음")
     args = ap.parse_args(argv)
 
@@ -400,7 +402,7 @@ def main(argv=None):
     session = make_session()
 
     log("[기본소득당] 목록 수집")
-    items, failed_pages = walk_list(session, raw_dir, log=log)
+    items, failed_pages = walk_list(session, raw_dir, log=log, limit_pages=args.limit_pages)
     with open(os.path.join(out_dir, "list.json"), "w", encoding="utf-8") as f:
         json.dump(items, f, ensure_ascii=False)
     items = filter_period(items, args.since, args.until, log=log)

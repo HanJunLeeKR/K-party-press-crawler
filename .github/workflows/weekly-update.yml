@@ -1,0 +1,92 @@
+name: Weekly update to Hugging Face
+
+# Collects the newest posts of the seven parties and APPENDS the new rows to the
+# party CSV files of the Hugging Face dataset (see tools/hf_update.py).
+#
+# Setup (once): in the GitHub repository go to
+#   Settings -> Secrets and variables -> Actions -> New repository secret
+# and add a secret named HF_TOKEN. Use a Hugging Face "fine-grained" token that has
+# WRITE access to the dataset hanjunlee/KoreanPartyPressRelease only.
+
+on:
+  schedule:
+    - cron: "17 21 * * 0"        # every Sunday 21:17 UTC (= Monday 06:17 in Korea)
+  workflow_dispatch:             # also lets you run it by hand from the Actions tab
+    inputs:
+      days:
+        description: "Collect posts from the last N days"
+        default: "21"
+      parties:
+        description: "Space-separated party names (empty = all seven)"
+        default: ""
+      dry_run:
+        description: "Dry run (collect and check, but do not upload)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: hf-weekly-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    env:
+      HF_TOKEN: ${{ secrets.HF_TOKEN }}
+      PYTHONUTF8: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install system programs (PDF text, OCR with Korean data)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq poppler-utils tesseract-ocr tesseract-ocr-kor
+
+      - name: Install Python packages
+        run: pip install -r requirements.txt
+
+      - name: Check that the token is available
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::The HF_TOKEN secret is missing. See the comment at the top of this file."
+            exit 1
+          fi
+
+      - name: Collect new posts and update the dataset
+        env:
+          DAYS: ${{ github.event.inputs.days || '21' }}
+          PARTIES: ${{ github.event.inputs.parties || '' }}
+          # scheduled runs always upload; manual runs upload only when "dry_run" is unchecked
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
+        run: |
+          ARGS="--days $DAYS --workdir ./_update"
+          if [ -n "$PARTIES" ]; then ARGS="$ARGS --parties $PARTIES"; fi
+          if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
+          python tools/hf_update.py $ARGS
+
+      - name: Write a short summary
+        if: always()
+        run: |
+          if [ -f _update/update_summary.json ]; then
+            echo '### Weekly update' >> "$GITHUB_STEP_SUMMARY"
+            echo '```json' >> "$GITHUB_STEP_SUMMARY"
+            cat _update/update_summary.json >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Keep the summary file
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: update-summary
+          path: _update/update_summary.json
+          if-no-files-found: ignore

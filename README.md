@@ -30,9 +30,10 @@ If you only want to *use* the data, download the dataset. If you want to *re-col
 6. [Understanding the output](#6-understanding-the-output)
 7. [Troubleshooting](#7-troubleshooting)
 8. [Collection criteria](#8-collection-criteria)
-9. [Responsible use](#9-responsible-use)
-10. [Repository layout](#10-repository-layout)
-11. [Citation and contact](#11-citation-and-contact)
+9. [Automatic weekly updates (GitHub Actions)](#9-automatic-weekly-updates-github-actions)
+10. [Responsible use](#10-responsible-use)
+11. [Repository layout](#11-repository-layout)
+12. [Citation and contact](#12-citation-and-contact)
 
 ---
 
@@ -317,17 +318,59 @@ To keep the parties comparable, the same rule is applied to every site:
 
 If a party changes its website, a crawler may stop working. Please open an issue with the command you ran and the error message.
 
-## 9. Responsible use
+## 9. Automatic weekly updates (GitHub Actions)
+
+The workflow `.github/workflows/weekly-update.yml` keeps the Hugging Face dataset up to date. Every **Sunday at 21:17 UTC (Monday 06:17 in Korea)** it:
+
+1. collects the posts of the **last 21 days** from all seven party websites (the overlap of three weeks prevents gaps if a run is missed),
+2. downloads each party's current CSV from the dataset,
+3. keeps only the posts that are **not in the CSV yet** (matched by URL),
+4. **appends** those rows at the end of the CSV and uploads the file as one commit named `Weekly update: ...`.
+
+Existing rows are never edited or removed. Before uploading, the script checks by hash that every old byte of the file is unchanged, and it refuses to upload a party whose number of new rows is implausible (more than 3,000), which would indicate a parsing problem. Hugging Face keeps the full history of the dataset, so any update can be reverted from the repository's *Files and versions → History* page.
+
+The code lives in `tools/hf_update.py` (it reuses the crawlers in `crawlers/`).
+
+### 9.1 One-time setup (for the repository owner)
+
+1. **Create a Hugging Face token.** Go to https://huggingface.co/settings/tokens → *Create new token* → type *Fine-grained* → give it **write** access to the dataset `hanjunlee/KoreanPartyPressRelease` only. Copy the token (it starts with `hf_`).
+2. **Store it as a GitHub secret.** In this repository: *Settings → Secrets and variables → Actions → New repository secret*. Name: `HF_TOKEN`. Value: the token. Never write a token into a file or a commit.
+3. **Enable Actions** (*Actions* tab → enable workflows, if asked).
+4. **Run a test first.** *Actions → Weekly update to Hugging Face → Run workflow*. Leave *dry run* checked. It collects and checks everything but uploads nothing. Open the run and read the summary at the bottom: the number of new posts per party should be small and plausible.
+5. **Run it for real once**, with *dry run* unchecked, and look at the new commit on the dataset page. After that the weekly schedule takes over.
+
+### 9.2 Running it by hand (locally)
+
+```bash
+export HF_TOKEN=hf_xxx                              # PowerShell: $env:HF_TOKEN="hf_xxx"
+python tools/hf_update.py --dry-run --parties 사회민주당 기본소득당     # test, no upload
+python tools/hf_update.py --days 21                                    # all parties, uploads
+```
+
+Useful options: `--days N` (period), `--parties ...` (subset), `--dry-run` (no upload), `--workdir DIR` (scratch folder). The token is required even for a dry run, because the dataset is gated.
+
+### 9.3 Things to know
+
+- **A failing party does not stop the others.** The run is marked as failed and GitHub emails the repository owner; fix the crawler and run the workflow again (already-uploaded parties are skipped because their posts are no longer new).
+- **Website changes** are the usual cause of failures. If a party redesigns its site, its crawler needs an update.
+- **Scheduled workflows are paused** by GitHub after 60 days without any repository activity. Re-enable them in the *Actions* tab if that happens.
+- **Network location.** GitHub's runners are outside Korea. If a party website blocks or throttles them, that party fails with connection errors; run the updater from your own computer instead (Section 9.2).
+- **Posts that are later edited** or whose attachments become available later are not refreshed, because the updater only appends posts it has not seen. Use the crawlers' `--exclude-csv` option (Section 5.3) for a manual repair.
+- The dataset card (README on Hugging Face) describes the first release of 2026-11-11; later rows are marked in the `source` column as `auto_update_YYYY-MM-DD`.
+
+## 10. Responsible use
 
 - **Be polite to the servers.** The defaults wait between requests; do not remove these waits or run many copies in parallel.
 - **Check the terms of each website** and the copyright rules that apply to your use. The texts are public communications of political organizations, but the websites' terms apply to how you collect and redistribute them.
 - Posts name public figures in their official roles. Do not use the data to target private individuals.
 - Raw data should be preserved. Do cleaning, de-duplication, and merging in a **new folder**, never by overwriting the raw files.
 
-## 10. Repository layout
+## 11. Repository layout
 
 ```text
 crawlers/            one crawler per party (crawl_dp.py, crawl_ppp.py, ...)
+tools/hf_update.py       weekly updater used by the GitHub Action (appends new posts to the dataset)
+.github/workflows/      GitHub Actions workflow (weekly-update.yml)
 tools/merge_parties.py   maintainer script that merged earlier and later collections
                          (paths are specific to the maintainer's working folders; read it as an example)
 notebooks/reinforce_dp.ipynb   earlier notebook for repairing Democratic Party CSV text
@@ -335,7 +378,7 @@ docs/diagnosis.md    record of the problems found when the dataset was first upd
 requirements.txt     Python packages
 ```
 
-## 11. Citation and contact
+## 12. Citation and contact
 
 If you use the dataset or this code in research, please cite:
 

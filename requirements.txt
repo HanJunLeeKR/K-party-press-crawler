@@ -2,3 +2,4 @@ requests
 beautifulsoup4
 pandas
 pyhwp
+huggingface_hub   # only needed for tools/hf_update.py

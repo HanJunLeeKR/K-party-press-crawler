@@ -106,10 +106,12 @@ def fetch_list_page(session, page, raw_dir):
     return parse_list(r.text)
 
 
-def walk_list(session, raw_dir, log=print):
+def walk_list(session, raw_dir, log=print, limit_pages=None):
     """빈 목록이 연속 2쪽 나올 때까지 순차 수집 (쪽 수가 적어 병렬 불필요)."""
     got, empty, page, failed_pages = {}, 0, 1, []
     while empty < 2:
+        if limit_pages and page > limit_pages:
+            break
         try:
             rows = fetch_list_page(session, page, raw_dir)
         except (FetchError, OSError):
@@ -306,6 +308,8 @@ def main(argv=None):
     ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--until", type=ymd, default=None, help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--include-sns", action="store_true", help="SNS 라벨도 포함 (기본: 제외)")
+    ap.add_argument("--limit-pages", type=int, default=None,
+                    help="최신 글부터 이 쪽 수까지만 목록 수집 (최근 글만 받을 때 사용, 목록은 최신순)")
     ap.add_argument("--exclude-csv", default="")
     args = ap.parse_args(argv)
     log = lambda m: print(m, file=sys.stderr, flush=True)
@@ -315,7 +319,7 @@ def main(argv=None):
     os.makedirs(out_dir, exist_ok=True)
     session = make_session()
     log("[사회민주당] 목록 수집")
-    items, failed_pages = walk_list(session, raw_dir, log=log)
+    items, failed_pages = walk_list(session, raw_dir, log=log, limit_pages=args.limit_pages)
     labels = {}
     for it in items:
         labels[it["category"]] = labels.get(it["category"], 0) + 1

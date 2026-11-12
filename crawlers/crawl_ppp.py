@@ -171,11 +171,11 @@ def fetch_list_page(session, bid, page, raw_dir):
     return parse_list(r.text, bid)
 
 
-def walk_list(session, bid, raw_dir, log=print):
+def walk_list(session, bid, raw_dir, log=print, limit_pages=None):
     """마지막 페이지까지 병렬로 받고, 실패한 페이지는 한 번 더 받는다. post_id 기준 중복 제거."""
     last = last_page(session, bid)
     log(f"  [{BOARDS[bid]}] 마지막 페이지 {last} (약 {last * 10}건 이하)")
-    pages = list(range(1, last + 1))
+    pages = list(range(1, (min(last, limit_pages) if limit_pages else last) + 1))
     got, failed_pages = {}, []
 
     def work(p):
@@ -415,6 +415,8 @@ def main(argv=None):
     ap.add_argument("--no-details", action="store_true", help="목록만 수집")
     ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--until", type=ymd, default=None, help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
+    ap.add_argument("--limit-pages", type=int, default=None,
+                    help="최신 글부터 이 쪽 수까지만 목록 수집 (최근 글만 받을 때 사용, 목록은 최신순)")
     ap.add_argument("--workers", type=int, default=3,
                     help="동시 요청 수 (기본 3). 서버가 연결을 끊으면 1로 낮추세요")
     ap.add_argument("--delay", type=float, default=0.0,
@@ -457,7 +459,7 @@ def main(argv=None):
             failed_pages = []
             log(f"  기존 list.json 사용 ({len(items)}건) — 목록 재수집 생략")
         else:
-            items, failed_pages = walk_list(session, bid, raw_dir, log=log)
+            items, failed_pages = walk_list(session, bid, raw_dir, log=log, limit_pages=args.limit_pages)
             with open(list_path, "w", encoding="utf-8") as f:
                 json.dump(items, f, ensure_ascii=False)
         items = filter_period(items, args.since, args.until, log=log)
