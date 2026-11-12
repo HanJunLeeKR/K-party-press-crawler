@@ -51,6 +51,7 @@ BOARDS = {
 TIMEOUT = (10, 60)
 MAX_RETRIES = 3
 WORKERS = 3
+DELAY = 0.0  # >0이면 요청마다 DELAY~DELAY*1.5초 대기 (--delay)
 DATE_RE = re.compile(r"(\d{4})[-.](\d{1,2})[-.](\d{1,2})")
 ZERO_WIDTH = re.compile(r"[​‌‍﻿\xa0]")
 HEADERS = {
@@ -90,6 +91,14 @@ def get(session, url, **kw):
             last = e
             time.sleep(2 * attempt)  # 연결 리셋 대비 간격을 늘린다
     raise FetchError(f"GET 실패 {url}: {last}")
+
+
+def pause(lo, hi):
+    """요청 간 대기. --delay를 주면 그 값(초)~1.5배로 대기한다."""
+    if DELAY > 0:
+        time.sleep(random.uniform(DELAY, DELAY * 1.5))
+    else:
+        time.sleep(random.uniform(lo, hi))
 
 
 def reason_text(status, fail_code=""):
@@ -170,7 +179,7 @@ def walk_list(session, bid, raw_dir, log=print):
     got, failed_pages = {}, []
 
     def work(p):
-        time.sleep(random.uniform(0.2, 0.5))
+        pause(0.2, 0.5)
         try:
             return p, fetch_list_page(session, bid, p, raw_dir), None
         except (FetchError, requests.RequestException, OSError) as e:
@@ -305,7 +314,7 @@ def run_details(session, items, out_dir, raw_dir, log=print):
     log(f"  상세 대상 {len(todo)}건 (완료 {len(done)}건 건너뜀)")
 
     def work(it):
-        time.sleep(random.uniform(0.3, 0.8))
+        pause(0.3, 0.8)
         try:
             return it, fetch_detail(session, it, raw_dir), None
         except (FetchError, requests.RequestException, OSError) as e:
@@ -406,6 +415,12 @@ def main(argv=None):
     ap.add_argument("--no-details", action="store_true", help="목록만 수집")
     ap.add_argument("--since", type=ymd, default=None, help="이 날짜(포함) 이후 글만 수집 (YYYY-MM-DD)")
     ap.add_argument("--until", type=ymd, default=None, help="이 날짜(포함) 이전 글만 수집 (YYYY-MM-DD)")
+    ap.add_argument("--workers", type=int, default=3,
+                    help="동시 요청 수 (기본 3). 서버가 연결을 끊으면 1로 낮추세요")
+    ap.add_argument("--delay", type=float, default=0.0,
+                    help="요청마다 대기할 초 (기본 0.2~0.8초). 느리게 받으려면 1.5 등으로 지정")
+    ap.add_argument("--reuse-list", action="store_true",
+                    help="출력 폴더에 list.json이 있으면 목록을 다시 받지 않고 그대로 사용 (이어 받기용)")
     ap.add_argument("--exclude-csv", default="", help="기존 CSV: 본문 있는 항목은 건너뛰고 빈 본문 항목은 다시 받음")
     args = ap.parse_args(argv)
 
@@ -417,8 +432,17 @@ def main(argv=None):
         keep_ok, keep_empty = old_text_ids(args.exclude_csv)
         log(f"  기존 CSV: 본문 있는 {len(keep_ok)}건 제외, 빈 본문 {len(keep_empty)}건 재수집")
 
+    global WORKERS, DELAY
+    WORKERS, DELAY = max(1, args.workers), max(0.0, args.delay)
     session = make_session()
-    session.get(SITE + "/news/comment/BBSDD0001", timeout=TIMEOUT)  # 쿠키 확보
+    for i in range(6):  # 쿠키 확보 (서버가 첫 연결을 끊는 경우가 있어 재시도)
+        try:
+            session.get(SITE + "/news/comment/BBSDD0001", timeout=TIMEOUT)
+            break
+        except requests.RequestException:
+            if i == 5:
+                raise
+            time.sleep(10 * (i + 1))
     bids = list(BOARDS) if args.board == "all" else [args.board]
     for bid in bids:
         name = BOARDS[bid]
@@ -426,9 +450,16 @@ def main(argv=None):
         raw_dir = os.path.join(out_dir, "raw")
         os.makedirs(out_dir, exist_ok=True)
         log(f"[{name}] 목록 수집")
-        items, failed_pages = walk_list(session, bid, raw_dir, log=log)
-        with open(os.path.join(out_dir, "list.json"), "w", encoding="utf-8") as f:
-            json.dump(items, f, ensure_ascii=False)
+        list_path = os.path.join(out_dir, "list.json")
+        if args.reuse_list and os.path.exists(list_path) and os.path.getsize(list_path) > 2:
+            with open(list_path, encoding="utf-8") as f:
+                items = json.load(f)
+            failed_pages = []
+            log(f"  기존 list.json 사용 ({len(items)}건) — 목록 재수집 생략")
+        else:
+            items, failed_pages = walk_list(session, bid, raw_dir, log=log)
+            with open(list_path, "w", encoding="utf-8") as f:
+                json.dump(items, f, ensure_ascii=False)
         items = filter_period(items, args.since, args.until, log=log)
         if args.no_details:
             continue
