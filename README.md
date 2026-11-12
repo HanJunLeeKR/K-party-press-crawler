@@ -407,3 +407,6 @@ If you use the dataset or this code in research, please cite:
 > Lee, H. J. (2026). *Korean Parliamentary Party Press Release Dataset* [Data set]. Hugging Face. https://huggingface.co/datasets/hanjunlee/KoreanPartyPressRelease
 
 Contact: hanjunleekr@hufs.ac.kr (Hankuk University of Foreign Studies). Bug reports and suggestions are welcome as GitHub issues.
+
+## Acknowledgements
+This notebook was developed with the assistance of Claude Opus 5.5 (Anthropic).
