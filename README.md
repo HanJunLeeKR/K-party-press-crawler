@@ -322,7 +322,7 @@ If a party changes its website, a crawler may stop working. Please open an issue
 
 The workflow `.github/workflows/weekly-update.yml` keeps the Hugging Face dataset up to date. Every **Sunday at 21:17 UTC (Monday 06:17 in Korea)** it:
 
-1. collects the posts of the **last 21 days** from all seven party websites (the overlap of three weeks prevents gaps if a run is missed),
+1. for each party, starts from the **newest date already in that party's file minus 3 days** (so a missed week is caught up automatically) and collects the newest list pages; **posts already in the file are not downloaded again**, which keeps the number of requests to each website small,
 2. downloads each party's current CSV from the dataset,
 3. keeps only the posts that are **not in the CSV yet** (matched by URL),
 4. **appends** those rows at the end of the CSV and uploads the file as one commit named `Weekly update: ...`.
@@ -345,7 +345,8 @@ The code lives in `tools/hf_update.py` (it reuses the crawlers in `crawlers/`).
 ```bash
 export HF_TOKEN=hf_xxx                              # PowerShell: $env:HF_TOKEN="hf_xxx"
 python tools/hf_update.py --dry-run --parties 사회민주당 기본소득당     # test, no upload
-python tools/hf_update.py --days 21                                    # all parties, uploads
+python tools/hf_update.py                                              # all parties, uploads (start = newest date in each file - 3 days)
+python tools/hf_update.py --days 21                                    # force a fixed 21-day window
 ```
 
 Useful options: `--days N` (period), `--parties ...` (subset), `--dry-run` (no upload), `--workdir DIR` (scratch folder). The token is required even for a dry run, because the dataset is gated.
@@ -367,7 +368,8 @@ The updater does not only look for crashes; it also detects *silent* breakage (a
 - no post at all was found in the period (not applied to 사회민주당, which publishes rarely),
 - more than 10% of the new posts have no title or no date (blocking),
 - more than 40% of the new posts have an empty body (warning only),
-- rows with `status = fetch_failed` are never uploaded; they are retried at the next run.
+- rows with `status = fetch_failed` are never uploaded, and neither are posts newer than them (so the file never has a gap); all of them are retried at the next run.
+- if a website stops answering (6 requests in a row fail), the Jinbo Party crawler stops at once instead of retrying for hours; it also runs slowly on GitHub (one request at a time, about 1.5–2.3 s apart).
 
 If any party is flagged or fails, the job ends as *failed* and the step `E-mail an alert if something went wrong` sends a plain-text mail (problem list, new rows per party, link to the run log) through Gmail. Healthy parties are still updated.
 

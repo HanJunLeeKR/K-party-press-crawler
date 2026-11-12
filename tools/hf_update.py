@@ -5,9 +5,11 @@ Weekly updater: collect the newest posts of the seven parties and APPEND the new
 party CSV files of the Hugging Face dataset.
 
 What it does, for each party
-  1. Runs that party's crawler for the last N days (default 21), newest list pages only.
-  2. Downloads the party's current CSV from the Hugging Face dataset.
-  3. Keeps only the posts that are not in the CSV yet (matched by URL).
+  1. Downloads the party's current CSV from the Hugging Face dataset.
+  2. Starts from the newest date already in that CSV minus 3 days (a missed week is caught up
+     automatically; --days N forces a fixed window instead).
+  3. Runs the crawler on the newest list pages. Posts already in the CSV are not downloaded again
+     (--exclude-csv), and the remaining ones are matched by URL and by title+date.
   4. Appends those rows at the END of the CSV. Existing rows are never changed.
   5. Checks that the first part of the file is byte-for-byte unchanged, then uploads it.
 
@@ -19,11 +21,13 @@ Safety rules built in
   * Change detection: an empty list, no posts at all, many posts without title/date, or many
     posts without body text is reported as a problem (exit code 1 -> e-mail alert in GitHub
     Actions). Rows that look broken are not uploaded.
+  * Posts whose page could not be downloaded are not appended, and neither are posts newer than
+    them, so the file never has a gap; all of them are retried at the next run.
   * Hugging Face keeps the full history of the dataset, so any update can be reverted.
 
 Usage
   export HF_TOKEN=hf_xxx            # a token with write access to the dataset
-  python tools/hf_update.py --repo hanjunlee/KoreanPartyPressRelease --days 21
+  python tools/hf_update.py --repo hanjunlee/KoreanPartyPressRelease
   python tools/hf_update.py --dry-run --parties 사회민주당 기본소득당     # test without uploading (token still needed to download)
 """
 
@@ -57,11 +61,13 @@ PARTIES = {
         "limit": 20,
         "cmds": [["crawl_dp.py", "--board", str(b)] for b in (188, 11, 230, 13)],
         "cols": {},
+        "exclude": True,
     },
     "국민의힘": {
         "limit": 20,
         "cmds": [["crawl_ppp.py", "--board", "all", "--workers", "1", "--delay", "1.0"]],
         "cols": {"category": "section"},
+        "exclude": True,
     },
     "조국혁신당": {
         "limit": None,  # reads the site's API; no list pages to limit
@@ -77,17 +83,21 @@ PARTIES = {
         "limit": 10,
         "cmds": [["crawl_basicincome.py"]],
         "cols": {},
+        "exclude": True,
     },
     "진보당": {
         "limit": 10,
-        "cmds": [["crawl_jinbo.py"]],
+        # slow and careful: the site stops answering GitHub's servers after many quick requests
+        "cmds": [["crawl_jinbo.py", "--workers", "1", "--delay", "1.5"]],
         "cols": {},
+        "exclude": True,
     },
     "사회민주당": {
-        "quiet_ok": True,   # publishes rarely: zero posts in 21 days is normal
+        "quiet_ok": True,   # publishes rarely: zero posts in a week is normal
         "limit": 5,
         "cmds": [["crawl_sdp.py"]],
         "cols": {},
+        "exclude": True,
     },
 }
 
@@ -119,7 +129,38 @@ def newest_date(workdir):
     return oldest
 
 
-def run_crawlers(party, spec, since, workdir):
+def listed_since(workdir, since):
+    """Number of posts on the list pages dated on or after `since` (before known posts are skipped).
+    None if the crawler writes no list.json (the RKP crawler reads an API instead of list pages)."""
+    paths = glob.glob(os.path.join(workdir, "**", "list.json"), recursive=True)
+    if not paths:
+        return None
+    n = 0
+    for p in paths:
+        try:
+            items = json.load(open(p, encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        n += sum(1 for i in items if (M.norm_dt(i.get("date", ""))[0] or "") >= since)
+    return n
+
+
+def auto_since(csv_path, overlap_days, fallback_days):
+    """Start date = newest date already in the dataset file minus a few days of overlap."""
+    today = datetime.now(KST).strftime("%Y-%m-%d")
+    try:
+        ds = pd.read_csv(csv_path, dtype=str, keep_default_na=False, usecols=["date"])["date"]
+        ds = ds[ds.str.match(r"^\d{4}-\d{2}-\d{2}$") & (ds <= today)]
+        newest = ds.max() if len(ds) else None
+    except (OSError, ValueError):
+        newest = None
+    if not newest:
+        return (datetime.now(KST) - timedelta(days=fallback_days)).strftime("%Y-%m-%d"), None
+    start = datetime.strptime(newest, "%Y-%m-%d") - timedelta(days=overlap_days)
+    return start.strftime("%Y-%m-%d"), newest
+
+
+def run_crawlers(party, spec, since, workdir, exclude_csv=None):
     """Run the crawler commands. The list pages are widened until the list reaches back past `since`."""
     limit = spec["limit"]
     for attempt in range(4):
@@ -130,6 +171,8 @@ def run_crawlers(party, spec, since, workdir):
                     "--since", since] + rest
             if limit:
                 args += ["--limit-pages", str(limit)]
+            if exclude_csv and spec.get("exclude"):
+                args += ["--exclude-csv", exclude_csv]  # posts already in the dataset are not downloaded again
             log(f"  $ {' '.join(os.path.basename(a) if a.endswith('.py') else a for a in args)}")
             r = subprocess.run(args)
             if r.returncode != 0:
@@ -155,7 +198,10 @@ def load_new_rows(party, spec, workdir, since):
     if not paths:
         empty = pd.DataFrame(columns=M.COLS)
         return empty, empty
-    frames = [M.rd(p) for p in sorted(paths)]
+    frames = [f for f in (M.rd(p) for p in sorted(paths)) if len(f)]
+    if not frames:  # every listed post is already in the dataset
+        empty = pd.DataFrame(columns=M.COLS)
+        return empty, empty
     df = pd.concat(frames, ignore_index=True)
     df = M.frame(df, party, f"auto_update_{datetime.now(KST).strftime('%Y-%m-%d')}", **spec["cols"])
     if party == "기본소득당":  # the site shows the time of day only inside each post page
@@ -165,7 +211,7 @@ def load_new_rows(party, spec, workdir, since):
     return df, df[df["date"] >= since].copy()
 
 
-def health_check(party, spec, workdir, all_rows, in_period, days):
+def health_check(party, spec, workdir, all_rows, in_period, since):
     """Detect a changed website. Returns (problems, block).
 
     problems: list of human-readable messages. block=True means the collected rows look broken
@@ -183,9 +229,13 @@ def health_check(party, spec, workdir, all_rows, in_period, days):
                             "The website structure may have changed.")
             block = True
     n = len(in_period)
-    if n == 0 and not spec.get("quiet_ok") and not block:
-        problems.append(f"{party}: no posts at all in the last {days} days. "
-                        "The website may have changed (or the site is blocking this server).")
+    # judged on the list pages, because posts already in the dataset are no longer downloaded
+    listed = listed_since(workdir, since)
+    if listed is None:  # no list pages: this crawler downloads the whole period, so count those rows
+        listed = n
+    if listed == 0 and not spec.get("quiet_ok") and not block:
+        problems.append(f"{party}: the list pages show no posts at all since {since}, although the dataset has "
+                        "posts from that period. The website may have changed (or the site is blocking this server).")
     total = len(all_rows)
     if total >= 10:
         no_title = float((all_rows["title"].str.strip() == "").mean())
@@ -241,7 +291,10 @@ def append_rows(csv_path, new, party):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--repo", default="hanjunlee/KoreanPartyPressRelease", help="Hugging Face dataset id")
-    ap.add_argument("--days", type=int, default=21, help="collect posts from the last N days (default 21)")
+    ap.add_argument("--days", type=int, default=None,
+                    help="collect posts from the last N days. Default: start from the newest date already in each "
+                         "party's file minus --overlap-days (so a missed week is caught up automatically)")
+    ap.add_argument("--overlap-days", type=int, default=3)
     ap.add_argument("--parties", nargs="*", default=list(PARTIES), choices=list(PARTIES))
     ap.add_argument("--workdir", default="./_update", help="scratch folder (crawler output and downloaded CSVs)")
     ap.add_argument("--dry-run", action="store_true", help="do everything except the upload")
@@ -255,9 +308,13 @@ def main():
         sys.exit("HF_TOKEN is not set. The dataset is gated, so a token is needed even to download it.")
     api = HfApi(token=token)
 
-    since = (datetime.now(KST) - timedelta(days=args.days)).strftime("%Y-%m-%d")
-    log(f"Collecting posts since {since} ({args.days} days) for: {', '.join(args.parties)}")
+    if args.days:
+        log(f"Collecting posts from the last {args.days} days for: {', '.join(args.parties)}")
+    else:
+        log(f"Collecting posts since the newest date in each file minus {args.overlap_days} days for: "
+            f"{', '.join(args.parties)}")
     os.makedirs(args.workdir, exist_ok=True)
+    sinces = {}
 
     ops, summary, errors, problems = [], {}, [], []
     for party in args.parties:
@@ -265,10 +322,22 @@ def main():
         log(f"\n=== {party} ===")
         try:
             out = os.path.join(args.workdir, "crawl", party)
-            run_crawlers(party, spec, since, out)
+            fname = FILE_FMT.format(party=party)
+            local = hf_hub_download(args.repo, fname, repo_type="dataset", token=token,
+                                    local_dir=os.path.join(args.workdir, "hf"))
+            if args.days:
+                since = (datetime.now(KST) - timedelta(days=args.days)).strftime("%Y-%m-%d")
+                log(f"  since {since}")
+            else:
+                since, newest = auto_since(local, args.overlap_days, 21)
+                log(f"  newest date in {fname}: {newest}; collecting since {since}")
+            sinces[party] = since
+            run_crawlers(party, spec, since, out, exclude_csv=local)
             all_rows, new = load_new_rows(party, spec, out, since)
-            log(f"  collected {len(new)} posts in the period")
-            found, block = health_check(party, spec, out, all_rows, new, args.days)
+            listed = listed_since(out, since)
+            log(f"  downloaded {len(new)} posts not yet in the dataset"
+                + (f" (list shows {listed} since {since})" if listed is not None else ""))
+            found, block = health_check(party, spec, out, all_rows, new, since)
             for msg in found:
                 log(f"  WARNING: {msg}")
             problems += found
@@ -279,20 +348,27 @@ def main():
             if "status" in new.columns:
                 failed_rows = new["status"] == "fetch_failed"
                 if failed_rows.any():
-                    msg = f"{party}: {int(failed_rows.sum())} posts could not be downloaded and were skipped (retried next run)."
+                    fdates = new.loc[failed_rows, "date"]
+                    fdates = fdates[fdates.str.strip() != ""]
+                    cutoff = fdates.min() if len(fdates) else None
+                    new = new[~failed_rows]
+                    held = 0
+                    if cutoff:
+                        # keep the file free of gaps: newer posts wait until the failed ones succeed,
+                        # because the next run starts from the newest date in the file
+                        held = int((new["date"] >= cutoff).sum())
+                        new = new[new["date"] < cutoff]
+                    msg = (f"{party}: {int(failed_rows.sum())} posts could not be downloaded; they and {held} newer "
+                           f"posts are held back and retried next run.")
                     log(f"  WARNING: {msg}")
                     problems.append(msg)
-                    new = new[~failed_rows]
 
-            fname = FILE_FMT.format(party=party)
-            local = hf_hub_download(args.repo, fname, repo_type="dataset", token=token,
-                                    local_dir=os.path.join(args.workdir, "hf"))
             ex = pd.read_csv(local, dtype=str, keep_default_na=False, usecols=["url", "title", "date"])
             have_urls = {url_key(u) for u in ex["url"]}
             have_td = {(re.sub(r"\s+", "", t), d) for t, d in zip(ex["title"], ex["date"])}
             is_new = [url_key(u) not in have_urls and (re.sub(r"\s+", "", t), d) not in have_td
                       for u, t, d in zip(new["url"], new["title"], new["date"])]
-            new = new[is_new]
+            new = new[pd.Series(is_new, index=new.index, dtype=bool)]
             new = new.drop_duplicates("url").sort_values(["date", "board_name"], kind="stable")
             log(f"  {len(new)} are new (not in {fname})")
             summary[party] = len(new)
@@ -325,7 +401,7 @@ def main():
     else:
         log("no new posts to upload")
     with open(os.path.join(args.workdir, "update_summary.json"), "w", encoding="utf-8") as f:
-        json.dump({"since": since, "new_rows": summary, "failed": errors, "problems": problems,
+        json.dump({"since": sinces, "new_rows": summary, "failed": errors, "problems": problems,
                    "run_at": datetime.now(KST).isoformat(timespec="seconds")}, f, ensure_ascii=False, indent=2)
     # a non-zero exit marks the GitHub run as failed, which triggers the e-mail alert
     sys.exit(1 if (errors or problems) else 0)

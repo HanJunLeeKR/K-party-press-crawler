@@ -18,8 +18,8 @@ on:
   workflow_dispatch:             # also lets you run it by hand from the Actions tab
     inputs:
       days:
-        description: "Collect posts from the last N days"
-        default: "21"
+        description: "Collect posts from the last N days (leave empty: start from the newest date already in each file)"
+        default: ""
       parties:
         description: "Space-separated party names (empty = all seven)"
         default: ""
@@ -67,12 +67,13 @@ jobs:
 
       - name: Collect new posts and update the dataset
         env:
-          DAYS: ${{ github.event.inputs.days || '21' }}
+          DAYS: ${{ github.event.inputs.days }}
           PARTIES: ${{ github.event.inputs.parties || '' }}
           # scheduled runs always upload; manual runs upload only when "dry_run" is unchecked
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run == 'true' }}
         run: |
-          ARGS="--days $DAYS --workdir ./_update"
+          ARGS="--workdir ./_update"
+          if [ -n "$DAYS" ]; then ARGS="$ARGS --days $DAYS"; fi
           if [ -n "$PARTIES" ]; then ARGS="$ARGS --parties $PARTIES"; fi
           if [ "$DRY_RUN" = "true" ]; then ARGS="$ARGS --dry-run"; fi
           python tools/hf_update.py $ARGS

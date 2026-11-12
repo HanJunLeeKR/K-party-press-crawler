@@ -14,7 +14,7 @@
   python crawl_jinbo.py --out ./out
   python crawl_jinbo.py --out ./out --exclude-csv 기존.csv
 """
-import argparse, base64, concurrent.futures, csv, gzip, json, os, random, re, subprocess, sys, time
+import argparse, base64, concurrent.futures, csv, gzip, json, os, random, re, subprocess, sys, threading, time
 from datetime import datetime
 from urllib.parse import urljoin, urlparse
 
@@ -26,6 +26,10 @@ BOARDS = {"보도자료": (286, "b_1_111"), "논평": (15, "b_1_2"), "모두발�
 TIMEOUT = (10, 60)
 MAX_RETRIES = 4
 WORKERS = 3
+DELAY = (0.4, 0.9)          # pause before each detail request (seconds, random in this range)
+BREAK_AFTER = 6             # stop after this many requests in a row fail after all retries (server not answering)
+_BREAKER = {"streak": 0, "open": False}
+_LOCK = threading.Lock()
 ZERO_WIDTH = re.compile(r"[\u200b\u200c\u200d\ufeff\xa0]")
 HEADERS = {"User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "Accept-Language": "ko-KR,ko;q=0.9"}
 SUCCESS_STATUS = {"ok", "image_ocr"}
@@ -51,17 +55,31 @@ def make_session():
 
 
 def get(session, url, **kw):
+    """GET with retries. If the server stops answering (BREAK_AFTER requests in a row fail after all
+    retries: timeouts, refused connections or server errors), the circuit breaker opens and every later request fails at once instead of waiting for timeouts."""
+    if _BREAKER["open"]:
+        raise FetchError(f"서버 무응답으로 중단됨 (circuit breaker): {url}")
     last = None
     for attempt in range(1, MAX_RETRIES + 1):
         try:
             r = session.get(url, timeout=TIMEOUT, **kw)
             r.raise_for_status()
             r.encoding = "utf-8"  # 서버가 charset을 알리지 않아 requests가 ISO-8859-1로 해석함
+            with _LOCK:
+                _BREAKER["streak"] = 0
             return r
         except requests.RequestException as e:
             last = e
+            if _BREAKER["open"]:
+                break
             time.sleep(3 * attempt)
-    raise FetchError(f"GET 실패 {url}: {last}")
+    with _LOCK:
+        _BREAKER["streak"] += 1
+        if _BREAKER["streak"] >= BREAK_AFTER and not _BREAKER["open"]:
+            _BREAKER["open"] = True
+            print(f"  !! {BREAK_AFTER}회 연속 요청 실패: 서버가 응답하지 않아 남은 요청을 중단합니다 "
+                  f"(마지막 오류: {type(last).__name__})", flush=True)
+    raise FetchError(f"GET 실패 {url}: {type(last).__name__}: {last}")
 
 
 def reason_text(status, fail_code=""):
@@ -251,7 +269,7 @@ def run_details(session, items, out_dir, raw_dir, log=print):
 
     def work(it):
         if not os.path.exists(os.path.join(raw_dir, "detail", it["board_name"], f"{it['post_id']}.html.gz")):
-            time.sleep(random.uniform(0.4, 0.9))  # 캐시가 있으면 서버 요청이 없으므로 대기 불필요
+            time.sleep(random.uniform(*DELAY))  # 캐시가 있으면 서버 요청이 없으므로 대기 불필요
         try:
             return it, fetch_detail(session, it, raw_dir), None
         except (FetchError, requests.RequestException, OSError) as e:
@@ -271,6 +289,9 @@ def run_details(session, items, out_dir, raw_dir, log=print):
                 if i % 100 == 0:
                     log(f"    round {rnd}: {i}/{len(queue)}")
             if not failed:
+                break
+            if _BREAKER["open"]:
+                log(f"  서버 무응답: 실패 {len(failed)}건은 재시도하지 않고 다음 실행으로 넘깁니다")
                 break
             log(f"  라운드 {rnd} 실패 {len(failed)}건 → 재시도")
             time.sleep(60)
@@ -333,6 +354,7 @@ def filter_period(items, since, until, log=print):
 
 
 def main(argv=None):
+    global WORKERS, DELAY
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
     ap.add_argument("--no-details", action="store_true")
@@ -342,7 +364,13 @@ def main(argv=None):
                     help="최신 글부터 이 쪽 수까지만 목록 수집 (최근 글만 받을 때 사용, 목록은 최신순)")
     ap.add_argument("--exclude-csv", default="")
     ap.add_argument("--boards", nargs="*", default=None, choices=list(BOARDS), help="수집할 게시판 (기본: 전체)")
+    ap.add_argument("--workers", type=int, default=3, help="동시 요청 수 (기본 3)")
+    ap.add_argument("--delay", type=float, default=None,
+                    help="상세 요청 사이 대기 초 (기본 0.4~0.9 무작위; 값을 주면 그 값~1.5배 무작위)")
     args = ap.parse_args(argv)
+    WORKERS = max(1, args.workers)
+    if args.delay is not None:
+        DELAY = (args.delay, args.delay * 1.5)
     log = lambda m: print(m, file=sys.stderr, flush=True)
 
     out_dir = os.path.join(args.out, "jinbo")
