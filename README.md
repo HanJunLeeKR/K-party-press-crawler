@@ -379,6 +379,8 @@ Setup (once):
 
 If the secrets are missing the step is skipped with a message; the original failure is not hidden.
 
+> **Material from another corpus.** 19 People Power Party documents that our crawl missed were added from Lim (2025) and are marked in the data. See [docs/APPENDIX_lim2025.md](docs/APPENDIX_lim2025.md).
+
 ## 10. Responsible use
 
 - **Be polite to the servers.** The defaults wait between requests; do not remove these waits or run many copies in parallel.
@@ -392,6 +394,7 @@ If the secrets are missing the step is skipped with a message; the original fail
 crawlers/            one crawler per party (crawl_dp.py, crawl_ppp.py, ...)
 tools/hf_update.py       weekly updater used by the GitHub Action (appends new posts to the dataset)
 tools/send_alert_mail.py alert e-mail sent by the workflow when a problem is detected
+docs/APPENDIX_lim2025.md which rows were supplemented from Lim (2025), and how they are marked
 .github/workflows/      GitHub Actions workflow (weekly-update.yml)
 tools/merge_parties.py   maintainer script that merged earlier and later collections
                          (paths are specific to the maintainer's working folders; read it as an example)
