@@ -3,6 +3,7 @@
 
 `party` is the successor name that identifies the file (e.g. 더불어민주당, 국민의힘). Those parties
 absorbed earlier names, so each row also records the party's official name on its `date`.
+The two periods in which the party was called 민주당 are labelled 민주당1st (2008-07-06 – 2011-12-17) and 민주당2nd (2013-05-04 – 2014-03-25).
 Rows without a usable date get an empty value. Dates are the official name-change dates (inclusive start).
 Cross-checked against the party names printed in the closing lines of the documents themselves.
 """
@@ -13,9 +14,9 @@ LINEAGES = {
         ("2003-11-11", "열린우리당"),
         ("2007-08-20", "대통합민주신당"),
         ("2008-02-18", "통합민주당"),
-        ("2008-07-06", "민주당"),
+        ("2008-07-06", "민주당1st"),
         ("2011-12-18", "민주통합당"),
-        ("2013-05-04", "민주당"),
+        ("2013-05-04", "민주당2nd"),
         ("2014-03-26", "새정치민주연합"),
         ("2015-12-28", "더불어민주당"),
     ],
