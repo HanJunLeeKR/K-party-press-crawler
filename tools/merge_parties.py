@@ -4,7 +4,7 @@
 정당별 병합 파일 생성 (원자료는 건드리지 않고 새 폴더에 쓴다)
 
 공통 컬럼
-  party, post_id, board_name, title, category, date, datetime, date_note, writer, text, url,
+  party, party_name_at_time, post_id, board_name, title, category, date, datetime, date_note, writer, text, url,
   text_source, status, fail_reason, fetched_at, source
 
 규칙
@@ -23,9 +23,10 @@ import argparse, csv, glob, gzip, json, os, re, sys
 from collections import defaultdict
 
 import pandas as pd
+from party_names import name_at
 from bs4 import BeautifulSoup
 
-COLS = ["party", "post_id", "board_name", "title", "category", "date", "datetime", "date_note", "writer",
+COLS = ["party", "party_name_at_time", "post_id", "board_name", "title", "category", "date", "datetime", "date_note", "writer",
         "text", "url", "text_source", "status", "fail_reason", "fetched_at", "source"]
 EMPTY_TEXT = {"", "nan", "본문 조회 실패"}
 DATE_RE = re.compile(r"(\d{4})[.\-/]\s*(\d{1,2})[.\-/]\s*(\d{1,2})")
@@ -173,6 +174,7 @@ def bi_times(raw_dir):
 def finalize(df, party):
     df = df.copy()
     df["party"] = party
+    df["party_name_at_time"] = [name_at(party, d) for d in df["date"]]
     df["date_note"] = ""
     if party == "더불어민주당":
         df.loc[df["date"] == PLACEHOLDER, "date_note"] = "사이트 일괄값 추정(2003-11-11)"
