@@ -187,6 +187,26 @@ Party-specific notes:
 - **Social Democratic Party.** Items labelled as social-media posts are skipped unless you add `--include-sns`.
 - **Progressive Party.** The website does not declare a character encoding; the crawler decodes pages as UTF-8 explicitly. The commentary board includes some posts titled as party-schedule announcements.
 
+### 4.1 Former parties: National Assembly Library (`crawl_nanet.py`)
+
+Parties that no longer exist (or were renamed) have no website to crawl. For 2014 onward their press releases are listed in the party press-release section of the National Assembly Library's Legislative Information Portal (law.nanet.go.kr). `crawlers/crawl_nanet.py` collects them and writes one CSV per party in the same column layout as the main dataset. No login is needed.
+
+```bash
+# everything in one go (resumable; takes about an hour per 10,000 records)
+python crawlers/crawl_nanet.py all --parties 정의당 국민의당 바른미래당 바른정당
+
+# or step by step
+python crawlers/crawl_nanet.py list                                   # list of all party records -> list_PA.jsonl
+python crawlers/crawl_nanet.py detail --parties 새누리당 --limit 1200  # bodies for the chosen parties
+python crawlers/crawl_nanet.py build  --parties 새누리당 --out out      # CSV per party -> out/{party}_보도자료.csv
+```
+
+- **Avoiding mix-ups between similar names.** The crawler never searches by keyword. It downloads the whole party list and keeps only records whose issuing body is *exactly* the name you pass to `--parties`, so "민주당" and "더불어민주당" can never be mixed. Joint statements (several parties in one record) are dropped for the same reason.
+- **Coverage.** The portal's party material begins in June 2014. Earlier predecessor names do not exist there.
+- **Body text** is read from the page's metadata and may be cut at about 4,000 characters; affected rows are noted in `fail_reason`, as are rows that say the content is in an attachment (첨부파일 참조).
+- **API key.** The scripts read an optional key from the environment variable `NANET_API_KEY` (set it with `export NANET_API_KEY=...`). Right now the web pages work without any key, so the variable is not required; it is reserved for a future switch to the portal's API. Never write keys into files that are committed.
+- All steps can be stopped and started again; finished records are skipped. Use `--workers` and `--delay` to be gentle with the server.
+
 ## 5. Common recipes
 
 ### 5.1 Collect a specific period
@@ -393,7 +413,8 @@ If the secrets are missing the step is skipped with a message; the original fail
 ## 11. Repository layout
 
 ```text
-crawlers/            one crawler per party (crawl_dp.py, crawl_ppp.py, ...)
+crawlers/            one crawler per party (crawl_dp.py, crawl_ppp.py, ...) and crawl_nanet.py for former parties (National Assembly Library)
+tools/party_names.py     party name on the document date (column party_name_at_time)
 tools/hf_update.py       weekly updater used by the GitHub Action (appends new posts to the dataset)
 tools/send_alert_mail.py alert e-mail sent by the workflow when a problem is detected
 docs/APPENDIX_lim2025.md which rows and dates were supplemented from Lim (2025), and how they are marked
